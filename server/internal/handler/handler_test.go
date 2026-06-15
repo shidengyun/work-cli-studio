@@ -2400,6 +2400,58 @@ func TestSendCodeRateLimit(t *testing.T) {
 	}
 }
 
+func TestListVerificationCodesDisabled(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv(verificationCodeViewerEnv, "")
+
+	w := httptest.NewRecorder()
+	req := newRequest(http.MethodGet, "/api/verification-codes", nil)
+
+	testHandler.ListVerificationCodes(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("ListVerificationCodes: expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestListVerificationCodesReturnsLatestRows(t *testing.T) {
+	t.Setenv(verificationCodeViewerEnv, "true")
+	const oldEmail = "viewer-list-old@multica.ai"
+	const newEmail = "viewer-list-new@multica.ai"
+	ctx := context.Background()
+
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM verification_code WHERE email IN ($1, $2)`, oldEmail, newEmail)
+	})
+
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO verification_code (email, code, expires_at, created_at, attempts)
+		VALUES
+			($1, '111111', now() + interval '10 minutes', now() + interval '1 minute', 1),
+			($2, '222222', now() + interval '10 minutes', now() + interval '2 minutes', 2)
+	`, oldEmail, newEmail); err != nil {
+		t.Fatalf("insert verification codes: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest(http.MethodGet, "/api/verification-codes?limit=1", nil)
+
+	testHandler.ListVerificationCodes(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ListVerificationCodes: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp ListVerificationCodesResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Codes) != 1 {
+		t.Fatalf("expected 1 code, got %d", len(resp.Codes))
+	}
+	if resp.Codes[0].Email != newEmail || resp.Codes[0].Code != "222222" || resp.Codes[0].Attempts != 2 {
+		t.Fatalf("unexpected latest code: %+v", resp.Codes[0])
+	}
+}
+
 func TestVerifyCode(t *testing.T) {
 	const email = "verify-test@multica.ai"
 	ctx := context.Background()

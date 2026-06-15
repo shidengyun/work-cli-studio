@@ -195,6 +195,21 @@ export interface CreatePersonalAccessTokenResponse extends PersonalAccessToken {
   token: string;
 }
 
+// Verification Codes
+export interface VerificationCode {
+  id: string;
+  email: string;
+  code: string;
+  expires_at: string;
+  used: boolean;
+  created_at: string;
+  attempts: number;
+}
+
+export interface ListVerificationCodesResponse {
+  codes: VerificationCode[];
+}
+
 // Pagination
 export interface PaginationParams {
   limit?: number;

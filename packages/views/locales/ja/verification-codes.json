@@ -1,0 +1,41 @@
+{
+  "title": "認証コード",
+  "actions": {
+    "refresh": "更新",
+    "copy_code": "コードをコピー"
+  },
+  "status": {
+    "active": "有効",
+    "used": "使用済み",
+    "expired": "期限切れ",
+    "locked": "ロック済み"
+  },
+  "table": {
+    "title": "最新コード",
+    "subtitle": "最新 {{count}} 件",
+    "count": "{{count}} 件",
+    "email": "メール",
+    "code": "コード",
+    "status": "状態",
+    "attempts": "試行回数",
+    "created_at": "作成日時",
+    "expires_at": "期限",
+    "id": "ID",
+    "empty_value": "-"
+  },
+  "disabled": {
+    "title": "ビューアーは無効です",
+    "description": "このサーバーでは認証コードの表示が無効です。"
+  },
+  "error": {
+    "title": "認証コードを読み込めません",
+    "description": "更新してもう一度お試しください。"
+  },
+  "empty": {
+    "title": "認証コードがありません",
+    "description": "新しいログインコードがここに表示されます。"
+  },
+  "toast": {
+    "copied": "コードをコピーしました"
+  }
+}

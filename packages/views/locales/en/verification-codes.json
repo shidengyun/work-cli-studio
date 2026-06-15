@@ -1,0 +1,41 @@
+{
+  "title": "Verification Codes",
+  "actions": {
+    "refresh": "Refresh",
+    "copy_code": "Copy code"
+  },
+  "status": {
+    "active": "Active",
+    "used": "Used",
+    "expired": "Expired",
+    "locked": "Locked"
+  },
+  "table": {
+    "title": "Latest codes",
+    "subtitle": "Latest {{count}} rows",
+    "count": "{{count}} rows",
+    "email": "Email",
+    "code": "Code",
+    "status": "Status",
+    "attempts": "Attempts",
+    "created_at": "Created",
+    "expires_at": "Expires",
+    "id": "ID",
+    "empty_value": "-"
+  },
+  "disabled": {
+    "title": "Viewer disabled",
+    "description": "Verification code viewing is disabled on this server."
+  },
+  "error": {
+    "title": "Unable to load verification codes",
+    "description": "Refresh and try again."
+  },
+  "empty": {
+    "title": "No verification codes",
+    "description": "New login codes will appear here."
+  },
+  "toast": {
+    "copied": "Code copied"
+  }
+}

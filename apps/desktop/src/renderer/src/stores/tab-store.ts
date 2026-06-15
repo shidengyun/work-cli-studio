@@ -137,6 +137,7 @@ const ROUTE_ICONS: Record<string, string> = {
   autopilots: "ListTodo",
   agents: "Bot",
   runtimes: "Monitor",
+  "verification-codes": "KeyRound",
   skills: "BookOpenText",
   settings: "Settings",
 };

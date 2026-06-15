@@ -1,0 +1,41 @@
+{
+  "title": "인증 코드",
+  "actions": {
+    "refresh": "새로고침",
+    "copy_code": "코드 복사"
+  },
+  "status": {
+    "active": "활성",
+    "used": "사용됨",
+    "expired": "만료됨",
+    "locked": "잠김"
+  },
+  "table": {
+    "title": "최신 코드",
+    "subtitle": "최근 {{count}}개 기록",
+    "count": "{{count}}개",
+    "email": "이메일",
+    "code": "코드",
+    "status": "상태",
+    "attempts": "시도 횟수",
+    "created_at": "생성 시간",
+    "expires_at": "만료 시간",
+    "id": "ID",
+    "empty_value": "-"
+  },
+  "disabled": {
+    "title": "뷰어가 비활성화됨",
+    "description": "이 서버에서는 인증 코드 보기가 비활성화되어 있습니다."
+  },
+  "error": {
+    "title": "인증 코드를 불러올 수 없음",
+    "description": "새로고침 후 다시 시도하세요."
+  },
+  "empty": {
+    "title": "인증 코드 없음",
+    "description": "새 로그인 코드가 여기에 표시됩니다."
+  },
+  "toast": {
+    "copied": "코드가 복사되었습니다"
+  }
+}

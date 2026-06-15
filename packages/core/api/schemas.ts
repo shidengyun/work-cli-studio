@@ -16,6 +16,7 @@ import type {
   CreateBillingPortalSessionResponse,
   GroupedIssuesResponse,
   ListIssuesResponse,
+  ListVerificationCodesResponse,
   ListWebhookDeliveriesResponse,
   Squad,
   TimelineEntry,
@@ -34,6 +35,7 @@ export interface AppConfigResponse {
   daemon_server_url?: string;
   daemon_app_url?: string;
   workspace_creation_disabled?: boolean;
+  verification_code_viewer_enabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +174,7 @@ export const AppConfigSchema = z.object({
   daemon_server_url: OptionalStringSchema,
   daemon_app_url: OptionalStringSchema,
   workspace_creation_disabled: BooleanWithDefaultSchema(false).optional(),
+  verification_code_viewer_enabled: BooleanWithDefaultSchema(false).optional(),
 }).loose();
 
 export const EMPTY_APP_CONFIG: AppConfigResponse = {
@@ -181,6 +184,25 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   daemon_server_url: "",
   daemon_app_url: "",
   workspace_creation_disabled: false,
+  verification_code_viewer_enabled: false,
+};
+
+const VerificationCodeSchema = z.object({
+  id: z.string(),
+  email: z.string(),
+  code: z.string(),
+  expires_at: z.string(),
+  used: BooleanWithDefaultSchema(false),
+  created_at: z.string(),
+  attempts: z.number().default(0),
+}).loose();
+
+export const ListVerificationCodesResponseSchema = z.object({
+  codes: z.array(VerificationCodeSchema).default([]),
+}).loose();
+
+export const EMPTY_LIST_VERIFICATION_CODES_RESPONSE: ListVerificationCodesResponse = {
+  codes: [],
 };
 
 export const CommentSchema = z.object({

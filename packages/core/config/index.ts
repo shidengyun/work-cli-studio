@@ -7,6 +7,7 @@ interface ConfigState {
   googleClientId: string;
   daemonServerUrl: string;
   daemonAppUrl: string;
+  verificationCodeViewerEnabled: boolean;
   // Self-host gate (#3433): when true, every "Create workspace" affordance
   // must be hidden. Defaults to false so unknown / older servers behave like
   // the managed-cloud case.
@@ -16,6 +17,7 @@ interface ConfigState {
     allowSignup: boolean;
     googleClientId?: string;
     workspaceCreationDisabled?: boolean;
+    verificationCodeViewerEnabled?: boolean;
   }) => void;
   setDaemonConfig: (config: {
     daemonServerUrl?: string;
@@ -29,10 +31,21 @@ export const configStore = createStore<ConfigState>((set) => ({
   googleClientId: "",
   daemonServerUrl: "",
   daemonAppUrl: "",
+  verificationCodeViewerEnabled: false,
   workspaceCreationDisabled: false,
   setCdnDomain: (domain) => set({ cdnDomain: domain }),
-  setAuthConfig: ({ allowSignup, googleClientId = "", workspaceCreationDisabled = false }) =>
-    set({ allowSignup, googleClientId, workspaceCreationDisabled }),
+  setAuthConfig: ({
+    allowSignup,
+    googleClientId = "",
+    workspaceCreationDisabled = false,
+    verificationCodeViewerEnabled = false,
+  }) =>
+    set({
+      allowSignup,
+      googleClientId,
+      workspaceCreationDisabled,
+      verificationCodeViewerEnabled,
+    }),
   setDaemonConfig: ({ daemonServerUrl = "", daemonAppUrl = "" }) =>
     set({ daemonServerUrl, daemonAppUrl }),
 }));

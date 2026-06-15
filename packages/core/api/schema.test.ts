@@ -109,6 +109,15 @@ describe("ApiClient schema fallback", () => {
     });
   });
 
+  describe("listVerificationCodes", () => {
+    it("falls back to an empty code list when the response is malformed", async () => {
+      stubFetchJson({ codes: "not-an-array" });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.listVerificationCodes();
+      expect(res).toEqual({ codes: [] });
+    });
+  });
+
   describe("listGroupedIssues", () => {
     it("falls back to empty groups when the response is malformed", async () => {
       stubFetchJson({ groups: "not-an-array" });

@@ -546,6 +546,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/api/cli-token", h.IssueCliToken)
 		r.Post("/api/upload-file", h.UploadFile)
 		r.Post("/api/feedback", h.CreateFeedback)
+		r.With(handler.RequireHumanActor).Get("/api/verification-codes", h.ListVerificationCodes)
 
 		// Attachment download — user-scoped (auth-only), NOT
 		// workspace-scoped. The handler self-resolves the workspace

@@ -79,6 +79,8 @@
     "./billing": "./billing/index.ts",
     "./billing/queries": "./billing/queries.ts",
     "./billing/mutations": "./billing/mutations.ts",
+    "./verification-codes": "./verification-codes/index.ts",
+    "./verification-codes/queries": "./verification-codes/queries.ts",
     "./github": "./github/index.ts",
     "./github/queries": "./github/queries.ts",
     "./lark": "./lark/index.ts",

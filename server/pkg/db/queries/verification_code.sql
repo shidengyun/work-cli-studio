@@ -28,6 +28,11 @@ WHERE email = $1
 ORDER BY created_at DESC
 LIMIT 1;
 
+-- name: ListLatestVerificationCodes :many
+SELECT * FROM verification_code
+ORDER BY created_at DESC
+LIMIT @row_limit::int;
+
 -- name: DeleteExpiredVerificationCodes :exec
 DELETE FROM verification_code
 WHERE expires_at < now() - interval '1 hour';

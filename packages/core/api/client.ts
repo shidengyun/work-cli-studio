@@ -42,6 +42,7 @@ import type {
   PersonalAccessToken,
   CreatePersonalAccessTokenRequest,
   CreatePersonalAccessTokenResponse,
+  ListVerificationCodesResponse,
   RuntimeUsage,
   IssueUsageSummary,
   RuntimeHourlyActivity,
@@ -153,6 +154,7 @@ import {
   EMPTY_CREATE_AGENT_FROM_TEMPLATE_RESPONSE,
   EMPTY_GROUPED_ISSUES_RESPONSE,
   EMPTY_LIST_ISSUES_RESPONSE,
+  EMPTY_LIST_VERIFICATION_CODES_RESPONSE,
   EMPTY_SQUAD,
   EMPTY_SQUAD_LIST,
   EMPTY_SQUAD_MEMBER_STATUS_LIST,
@@ -164,6 +166,7 @@ import {
   type AppConfigResponse,
   GroupedIssuesResponseSchema,
   ListIssuesResponseSchema,
+  ListVerificationCodesResponseSchema,
   ListWebhookDeliveriesResponseSchema,
   RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
@@ -419,6 +422,19 @@ export class ApiClient {
     return parseWithFallback(raw, UserSchema, EMPTY_USER, {
       endpoint: "GET /api/me",
     });
+  }
+
+  async listVerificationCodes(
+    limit?: number,
+  ): Promise<ListVerificationCodesResponse> {
+    const query = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
+    const raw = await this.fetch<unknown>(`/api/verification-codes${query}`);
+    return parseWithFallback(
+      raw,
+      ListVerificationCodesResponseSchema,
+      EMPTY_LIST_VERIFICATION_CODES_RESPONSE,
+      { endpoint: "GET /api/verification-codes" },
+    );
   }
 
   async markOnboardingComplete(payload?: {

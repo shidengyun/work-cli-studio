@@ -106,6 +106,40 @@ func (q *Queries) IncrementVerificationCodeAttempts(ctx context.Context, id pgty
 	return err
 }
 
+const listLatestVerificationCodes = `-- name: ListLatestVerificationCodes :many
+SELECT id, email, code, expires_at, used, created_at, attempts FROM verification_code
+ORDER BY created_at DESC
+LIMIT $1::int
+`
+
+func (q *Queries) ListLatestVerificationCodes(ctx context.Context, rowLimit int32) ([]VerificationCode, error) {
+	rows, err := q.db.Query(ctx, listLatestVerificationCodes, rowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []VerificationCode{}
+	for rows.Next() {
+		var i VerificationCode
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Code,
+			&i.ExpiresAt,
+			&i.Used,
+			&i.CreatedAt,
+			&i.Attempts,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markVerificationCodeUsed = `-- name: MarkVerificationCodeUsed :exec
 UPDATE verification_code
 SET used = TRUE

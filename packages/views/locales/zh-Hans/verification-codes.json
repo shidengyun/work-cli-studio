@@ -1,0 +1,41 @@
+{
+  "title": "验证码",
+  "actions": {
+    "refresh": "刷新",
+    "copy_code": "复制验证码"
+  },
+  "status": {
+    "active": "可用",
+    "used": "已使用",
+    "expired": "已过期",
+    "locked": "已锁定"
+  },
+  "table": {
+    "title": "最新验证码",
+    "subtitle": "最新 {{count}} 条记录",
+    "count": "{{count}} 条",
+    "email": "邮箱",
+    "code": "验证码",
+    "status": "状态",
+    "attempts": "尝试次数",
+    "created_at": "创建时间",
+    "expires_at": "过期时间",
+    "id": "ID",
+    "empty_value": "-"
+  },
+  "disabled": {
+    "title": "查看入口已关闭",
+    "description": "当前服务器未启用验证码查看入口。"
+  },
+  "error": {
+    "title": "无法加载验证码",
+    "description": "刷新后重试。"
+  },
+  "empty": {
+    "title": "暂无验证码",
+    "description": "新的登录验证码会显示在这里。"
+  },
+  "toast": {
+    "copied": "验证码已复制"
+  }
+}

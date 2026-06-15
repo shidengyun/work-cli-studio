@@ -56,6 +56,7 @@ export function AuthInitializer({
           // Old servers omit this field — treat that as "creation allowed"
           // (the managed-cloud default) rather than blocking the UI.
           workspaceCreationDisabled: cfg.workspace_creation_disabled === true,
+          verificationCodeViewerEnabled: cfg.verification_code_viewer_enabled === true,
         });
         configStore.getState().setDaemonConfig({
           daemonServerUrl: cfg.daemon_server_url,

@@ -241,3 +241,49 @@ func TestGetConfigExposesWorkspaceCreationDisabled(t *testing.T) {
 		t.Fatalf("workspace_creation_disabled: want true with env on, got false (body=%s)", w.Body.String())
 	}
 }
+
+func TestGetConfigExposesVerificationCodeViewerFlag(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv(verificationCodeViewerEnv, "true")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	w := httptest.NewRecorder()
+
+	testHandler.GetConfig(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetConfig: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var cfg AppConfig
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if !cfg.VerificationCodeViewerEnabled {
+		t.Fatalf("verification_code_viewer_enabled: want true with env on, got false")
+	}
+}
+
+func TestVerificationCodeViewerEnabledEnv(t *testing.T) {
+	tests := []struct {
+		name   string
+		appEnv string
+		flag   string
+		want   bool
+	}{
+		{name: "explicit true wins in production", appEnv: "production", flag: "true", want: true},
+		{name: "explicit false wins in development", appEnv: "development", flag: "false", want: false},
+		{name: "development enables viewer", appEnv: "development", flag: "", want: true},
+		{name: "empty app env stays disabled", appEnv: "", flag: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("APP_ENV", tt.appEnv)
+			t.Setenv(verificationCodeViewerEnv, tt.flag)
+
+			if got := verificationCodeViewerEnabled(); got != tt.want {
+				t.Fatalf("verificationCodeViewerEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
