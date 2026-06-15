@@ -273,7 +273,7 @@ func TestVerificationCodeViewerEnabledEnv(t *testing.T) {
 		{name: "explicit true wins in production", appEnv: "production", flag: "true", want: true},
 		{name: "explicit false wins in development", appEnv: "development", flag: "false", want: false},
 		{name: "development enables viewer", appEnv: "development", flag: "", want: true},
-		{name: "empty app env stays disabled", appEnv: "", flag: "", want: false},
+		{name: "empty app env defaults to local viewer", appEnv: "", flag: "", want: true},
 	}
 
 	for _, tt := range tests {

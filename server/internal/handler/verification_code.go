@@ -38,7 +38,7 @@ func verificationCodeViewerEnabled() bool {
 
 	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
 	switch appEnv {
-	case "dev", "development", "local", "test":
+	case "", "dev", "development", "local", "test":
 		return true
 	default:
 		return false
