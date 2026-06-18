@@ -293,6 +293,77 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.3.25",
+        date: "2026-06-18",
+        title: "More Reliable Agent Work Across Skills, Autopilots, and Chat",
+        changes: [],
+        features: [
+          "Local skill libraries on a developer machine can now be picked up automatically for agent runs",
+          "Autopilots can include default subscribers so the right teammates are included when new Issues are created",
+          "Chat attachments now stay tied to the current workspace and messages can continue sending without blocking the conversation",
+          "Failed agent comments can be retried directly from the Issue timeline",
+        ],
+        improvements: [
+          "Usage reporting is more accurate when the same model name is available from different providers",
+          "Older Codex usage records can be filled in for more complete usage history",
+          "Runtime storage reporting is more complete across multiple workspace locations",
+          "Background task guidance and release checks are stricter, helping catch risky changes earlier",
+        ],
+        fixes: [
+          "Issue mention chips in chat and comments now fit their container and no longer overlap nearby text",
+          "Workspace links now use the correct deployment host more reliably",
+          "Autopilot run folders are cleaned up after terminal runs finish",
+          "Desktop builds now handle commit-based version names correctly",
+          "Tencent CodeBuddy shows the correct provider logo",
+          "Daemon claim responses are smaller and faster to transfer",
+        ],
+      },
+      {
+        version: "0.3.24",
+        date: "2026-06-17",
+        title: "Custom Runtimes",
+        changes: [],
+        features: [
+          "Teams can create custom runtimes so agents use the right local tools and models",
+          "CLI agent create and update now supports thinking level",
+        ],
+        improvements: [
+          "Runtime profiles sync faster and prefer the best match for the current environment",
+          "Client error and freeze reports now group duplicates",
+          "Issue trigger previews are easier to read",
+        ],
+        fixes: [
+          "Office 365 email delivery is more reliable",
+          "GitHub installation context and pending CI display are more reliable",
+          "Codex runs fail quickly when the app server exits",
+          "Self-healing runtimes can be deleted again, and incompatible models are cleared on runtime switch",
+          "Unknown Issue icons and plain filenames are handled safely",
+        ],
+      },
+      {
+        version: "0.3.23",
+        date: "2026-06-16",
+        title: "Issue Date Filters and More Stable Agent Runs",
+        changes: [],
+        features: [
+          "Issues can now be filtered by created or updated date, with quick ranges and custom date selections",
+          "Command line users can now delete runtimes with safer defaults and an explicit option for related data",
+          "Lark connections can now use network proxies, helping teams in restricted network environments connect reliably",
+        ],
+        improvements: [
+          "Web and desktop failures are now easier to investigate with clearer reports for errors, freezes, and crashes",
+          "Project rows, comment previews, and comment composers are more consistent and easier to use",
+        ],
+        fixes: [
+          "Reply and edit previews now show the right agents or squads before a comment is saved",
+          "Plain Issue IDs in comments now stay as text unless they are intentionally linked",
+          "Google sign-in from command line login now returns to the command line correctly after browser authentication",
+          "Chat file uploads wait until an active agent is ready, avoiding failed uploads during loading",
+          "Transcript actions remain visible on touch devices where hover is unavailable",
+          "Agent instructions for posting comments now avoid shell formatting problems that could drop assignees, projects, or other fields",
+        ],
+      },
+      {
         version: "0.3.22",
         date: "2026-06-15",
         title: "Faster Lists, Easier Runtime Setup, and Safer Issue Editing",
