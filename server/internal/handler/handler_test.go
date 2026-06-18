@@ -2400,21 +2400,19 @@ func TestSendCodeRateLimit(t *testing.T) {
 	}
 }
 
-func TestListVerificationCodesDisabled(t *testing.T) {
+func TestListVerificationCodesIsPublicInProduction(t *testing.T) {
 	t.Setenv("APP_ENV", "production")
-	t.Setenv(verificationCodeViewerEnv, "")
 
 	w := httptest.NewRecorder()
 	req := newRequest(http.MethodGet, "/api/verification-codes", nil)
 
 	testHandler.ListVerificationCodes(w, req)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("ListVerificationCodes: expected 403, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("ListVerificationCodes: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
 func TestListVerificationCodesReturnsLatestRows(t *testing.T) {
-	t.Setenv(verificationCodeViewerEnv, "true")
 	const oldEmail = "viewer-list-old@multica.ai"
 	const newEmail = "viewer-list-new@multica.ai"
 	ctx := context.Background()

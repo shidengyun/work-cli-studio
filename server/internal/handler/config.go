@@ -35,9 +35,8 @@ type AppConfig struct {
 	// with the operator's own domains instead of Multica Cloud defaults.
 	DaemonServerURL string `json:"daemon_server_url,omitempty"`
 	DaemonAppURL    string `json:"daemon_app_url,omitempty"`
-	// VerificationCodeViewerEnabled only reveals whether the dev/self-host
-	// viewer route should be shown. The actual verification codes stay behind
-	// authenticated, human-only API middleware.
+	// VerificationCodeViewerEnabled is kept for clients that conditionally show
+	// the viewer nav item. The viewer route is public for this deployment.
 	VerificationCodeViewerEnabled bool `json:"verification_code_viewer_enabled,omitempty"`
 
 	// PostHog public config for the frontend. The key is the same Project
@@ -59,7 +58,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		AllowSignup:                   os.Getenv("ALLOW_SIGNUP") != "false",
 		GoogleClientID:                os.Getenv("GOOGLE_CLIENT_ID"),
 		WorkspaceCreationDisabled:     os.Getenv("DISABLE_WORKSPACE_CREATION") == "true",
-		VerificationCodeViewerEnabled: verificationCodeViewerEnabled(),
+		VerificationCodeViewerEnabled: true,
 	}
 	if h.Storage != nil {
 		config.CdnDomain = h.Storage.CdnDomain()

@@ -152,14 +152,12 @@ const configureNav: {
   key: NavKey;
   labelKey: NavLabelKey;
   icon: typeof Inbox;
-  requiresVerificationCodeViewer?: boolean;
 }[] = [
   { key: "runtimes", labelKey: "runtimes", icon: Monitor },
   {
     key: "verificationCodes",
     labelKey: "verification_codes",
     icon: KeyRound,
-    requiresVerificationCodeViewer: true,
   },
   { key: "skills", labelKey: "skills", icon: BookOpenText },
   { key: "settings", labelKey: "settings", icon: Settings },
@@ -353,9 +351,17 @@ interface AppSidebarProps {
   headerClassName?: string;
   /** Extra style for SidebarHeader */
   headerStyle?: React.CSSProperties;
+  /** Web exposes verification codes globally; desktop keeps the workspace tab route. */
+  verificationCodesHref?: string;
 }
 
-export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }: AppSidebarProps = {}) {
+export function AppSidebar({
+  topSlot,
+  searchSlot,
+  headerClassName,
+  headerStyle,
+  verificationCodesHref,
+}: AppSidebarProps = {}) {
   const { t } = useT("layout");
   const { pathname, push } = useNavigation();
   const user = useAuthStore((s) => s.user);
@@ -366,7 +372,6 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
   const { data: workspaces = EMPTY_WORKSPACES } = useQuery(workspaceListOptions());
   const { data: myInvitations = EMPTY_INVITATIONS } = useQuery(myInvitationListOptions());
   const workspaceCreationDisabled = useConfigStore((s) => s.workspaceCreationDisabled);
-  const verificationCodeViewerEnabled = useConfigStore((s) => s.verificationCodeViewerEnabled);
 
   const wsId = workspace?.id;
   const { data: inboxItems = EMPTY_INBOX } = useQuery({
@@ -722,31 +727,28 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
             <SidebarGroupLabel>{t(($) => $.sidebar.configure_group)}</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu className="gap-0.5">
-                {configureNav
-                  .filter(
-                    (item) =>
-                      !item.requiresVerificationCodeViewer ||
-                      verificationCodeViewerEnabled,
-                  )
-                  .map((item) => {
-                    const href = p[item.key]();
-                    const isActive = isNavActive(pathname, href);
-                    return (
-                      <SidebarMenuItem key={item.key}>
-                        <SidebarMenuButton
-                          isActive={isActive}
-                          render={<AppLink href={href} />}
-                          className="text-muted-foreground hover:not-data-active:bg-sidebar-accent/70 data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground"
-                        >
-                          <item.icon />
-                          <span>{t(($) => $.nav[item.labelKey])}</span>
-                          {item.key === "runtimes" && hasRuntimeUpdates && (
-                            <span className="ml-auto size-1.5 rounded-full bg-destructive" />
-                          )}
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    );
-                  })}
+                {configureNav.map((item) => {
+                  const href =
+                    item.key === "verificationCodes" && verificationCodesHref
+                      ? verificationCodesHref
+                      : p[item.key]();
+                  const isActive = isNavActive(pathname, href);
+                  return (
+                    <SidebarMenuItem key={item.key}>
+                      <SidebarMenuButton
+                        isActive={isActive}
+                        render={<AppLink href={href} />}
+                        className="text-muted-foreground hover:not-data-active:bg-sidebar-accent/70 data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground"
+                      >
+                        <item.icon />
+                        <span>{t(($) => $.nav[item.labelKey])}</span>
+                        {item.key === "runtimes" && hasRuntimeUpdates && (
+                          <span className="ml-auto size-1.5 rounded-full bg-destructive" />
+                        )}
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>

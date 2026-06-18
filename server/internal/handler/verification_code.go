@@ -2,14 +2,11 @@ package handler
 
 import (
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
-
-const verificationCodeViewerEnv = "MULTICA_VERIFICATION_CODE_VIEWER"
 
 type VerificationCodeResponse struct {
 	ID        string `json:"id"`
@@ -23,26 +20,6 @@ type VerificationCodeResponse struct {
 
 type ListVerificationCodesResponse struct {
 	Codes []VerificationCodeResponse `json:"codes"`
-}
-
-func verificationCodeViewerEnabled() bool {
-	raw := strings.TrimSpace(os.Getenv(verificationCodeViewerEnv))
-	if raw != "" {
-		switch strings.ToLower(raw) {
-		case "1", "true", "yes", "on":
-			return true
-		case "0", "false", "no", "off":
-			return false
-		}
-	}
-
-	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-	switch appEnv {
-	case "", "dev", "development", "local", "test":
-		return true
-	default:
-		return false
-	}
 }
 
 func verificationCodeToResponse(code db.VerificationCode) VerificationCodeResponse {
@@ -76,11 +53,6 @@ func parseVerificationCodeLimit(r *http.Request) int32 {
 }
 
 func (h *Handler) ListVerificationCodes(w http.ResponseWriter, r *http.Request) {
-	if !verificationCodeViewerEnabled() {
-		writeError(w, http.StatusForbidden, "verification code viewer is disabled")
-		return
-	}
-
 	codes, err := h.Queries.ListLatestVerificationCodes(r.Context(), parseVerificationCodeLimit(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list verification codes")

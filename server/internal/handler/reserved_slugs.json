@@ -16,6 +16,7 @@
         "invite",
         "invitations",
         "verify",
+        "verification",
         "reset",
         "password",
         "onboarding"

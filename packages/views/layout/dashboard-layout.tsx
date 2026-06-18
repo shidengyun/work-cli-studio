@@ -17,6 +17,8 @@ interface DashboardLayoutProps {
   searchSlot?: ReactNode;
   /** Loading indicator */
   loadingIndicator?: ReactNode;
+  /** Optional override for the verification-code viewer nav destination. */
+  verificationCodesHref?: string;
 }
 
 export function DashboardLayout({
@@ -24,6 +26,7 @@ export function DashboardLayout({
   extra,
   searchSlot,
   loadingIndicator,
+  verificationCodesHref,
 }: DashboardLayoutProps) {
   return (
     <DashboardGuard
@@ -35,7 +38,10 @@ export function DashboardLayout({
     >
       <SidebarProvider className="h-svh">
         <WorkspacePresencePrefetch />
-        <AppSidebar searchSlot={searchSlot} />
+        <AppSidebar
+          searchSlot={searchSlot}
+          verificationCodesHref={verificationCodesHref}
+        />
         <SidebarInset className="relative overflow-hidden">
           <NavigationProgress />
           {children}
