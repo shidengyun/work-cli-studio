@@ -1,4 +1,4 @@
-import { githubUrl } from "../components/shared";
+import { githubUrl, discordUrl } from "../components/shared";
 import type { LandingDict } from "./types";
 
 export function createEnDict(allowSignup: boolean): LandingDict {
@@ -244,6 +244,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
           { label: "Documentation", href: "/docs" },
           { label: "API", href: githubUrl },
           { label: "X (Twitter)", href: "https://x.com/MulticaAI" },
+          { label: "Discord", href: discordUrl },
         ],
       },
       company: {
@@ -292,6 +293,29 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       fixes: "Bug Fixes",
     },
     entries: [
+      {
+        version: "0.3.27",
+        date: "2026-06-22",
+        title: "Threaded Lark Replies and Smoother Team Workflows",
+        changes: [],
+        features: [
+          "Lark conversations now reply inside the original topic when a message starts from a topic, keeping team discussions easier to follow",
+          "Squad leaders can see member skills in the roster, making delegation more precise",
+          "Discord is now available from the website footer, help menu, README, and a dismissible in-app sidebar card",
+        ],
+        improvements: [
+          "Agent activity in Issue headers opens on hover, so live work is easier to check at a glance",
+          "Desktop sidebars and pinned navigation feel smoother, clearer, and less noisy",
+          "Chat replies, assignment catch-up, and contributor guidance are tighter so agent work stays in the right place with less noise",
+          "Remote CLI setup and custom runtime deletion now give clearer guidance before users continue",
+        ],
+        fixes: [
+          "Backlog parent Issues stay parked when child work finishes, avoiding unexpected follow-up automation",
+          "Project deletion now requires an owner or admin, and private GitHub skill imports work when a valid token is available",
+          "Login verification focuses the code field automatically, and detail sidebars no longer animate unexpectedly when pages open",
+          "Codex and daemon diagnostics are more reliable when permissions or slow task claims need investigation",
+        ],
+      },
       {
         version: "0.3.25",
         date: "2026-06-18",
