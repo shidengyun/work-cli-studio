@@ -2,6 +2,7 @@ package service
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -9,8 +10,11 @@ import (
 	"net/smtp"
 	"net/textproto"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/util/secretbox"
 )
 
 type fakeSMTPAuthClient struct {
@@ -135,17 +139,22 @@ func TestNewEmailService_TLSMode(t *testing.T) {
 		smtpTLS      string
 		smtpPort     string
 		wantImplicit bool
+		wantDisabled bool
 	}{
-		{"unset on 465 auto-enables implicit", "", "465", true},
-		{"unset on 587 stays starttls", "", "587", false},
-		{"unset default port stays starttls", "", "", false},
-		{"explicit implicit on 587 forces SMTPS", "implicit", "587", true},
-		{"smtps alias", "smtps", "587", true},
-		{"ssl alias", "ssl", "587", true},
-		{"explicit starttls on 465 overrides auto-detect", "starttls", "465", false},
-		{"case-insensitive", "IMPLICIT", "587", true},
-		{"trims whitespace", "  implicit  ", "587", true},
-		{"unknown value falls back to starttls", "tls", "465", false},
+		{"unset on 465 auto-enables implicit", "", "465", true, false},
+		{"unset on 587 stays starttls", "", "587", false, false},
+		{"unset default port stays starttls", "", "", false, false},
+		{"explicit implicit on 587 forces SMTPS", "implicit", "587", true, false},
+		{"smtps alias", "smtps", "587", true, false},
+		{"ssl alias", "ssl", "587", true, false},
+		{"explicit starttls on 465 overrides auto-detect", "starttls", "465", false, false},
+		{"case-insensitive", "IMPLICIT", "587", true, false},
+		{"trims whitespace", "  implicit  ", "587", true, false},
+		{"unknown value falls back to starttls", "tls", "465", false, false},
+		{"none disables TLS upgrade", "none", "25", false, true},
+		{"plain disables TLS upgrade", "plain", "25", false, true},
+		{"off disables TLS upgrade", "off", "25", false, true},
+		{"none on 465 overrides implicit auto-detect", "none", "465", false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -154,13 +163,80 @@ func TestNewEmailService_TLSMode(t *testing.T) {
 			t.Setenv("SMTP_HOST", "smtp.example.com")
 			t.Setenv("SMTP_PORT", tt.smtpPort)
 			t.Setenv("SMTP_TLS", tt.smtpTLS)
+			t.Setenv("SMTP_PASSWORD", "")
+			t.Setenv("SMTP_PASSWORD_ENCRYPTED", "")
+			t.Setenv("SMTP_PASSWORD_SECRET_KEY", "")
+			t.Setenv("SMTP_PASSWORD_SECRET_KEY_FILE", "")
 
 			s := NewEmailService()
 			if s.smtpTLSImplicit != tt.wantImplicit {
 				t.Errorf("SMTP_TLS=%q SMTP_PORT=%q: smtpTLSImplicit = %v, want %v",
 					tt.smtpTLS, tt.smtpPort, s.smtpTLSImplicit, tt.wantImplicit)
 			}
+			if s.smtpTLSDisabled != tt.wantDisabled {
+				t.Errorf("SMTP_TLS=%q SMTP_PORT=%q: smtpTLSDisabled = %v, want %v",
+					tt.smtpTLS, tt.smtpPort, s.smtpTLSDisabled, tt.wantDisabled)
+			}
 		})
+	}
+}
+
+func TestNewEmailService_EncryptedSMTPPasswordFromEnvKey(t *testing.T) {
+	key := make([]byte, secretbox.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand.Read key: %v", err)
+	}
+	box, err := secretbox.New(key)
+	if err != nil {
+		t.Fatalf("secretbox.New: %v", err)
+	}
+	sealed, err := box.Seal([]byte("encrypted-pass"))
+	if err != nil {
+		t.Fatalf("box.Seal: %v", err)
+	}
+
+	t.Setenv("RESEND_API_KEY", "")
+	t.Setenv("SMTP_HOST", "smtp.example.com")
+	t.Setenv("SMTP_PASSWORD", "")
+	t.Setenv("SMTP_PASSWORD_ENCRYPTED", base64.StdEncoding.EncodeToString(sealed))
+	t.Setenv("SMTP_PASSWORD_SECRET_KEY", base64.StdEncoding.EncodeToString(key))
+	t.Setenv("SMTP_PASSWORD_SECRET_KEY_FILE", "")
+
+	s := NewEmailService()
+	if s.smtpPassword != "encrypted-pass" {
+		t.Fatalf("smtpPassword = %q, want decrypted password", s.smtpPassword)
+	}
+}
+
+func TestNewEmailService_EncryptedSMTPPasswordFromKeyFile(t *testing.T) {
+	key := make([]byte, secretbox.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand.Read key: %v", err)
+	}
+	box, err := secretbox.New(key)
+	if err != nil {
+		t.Fatalf("secretbox.New: %v", err)
+	}
+	sealed, err := box.Seal([]byte("file-key-pass"))
+	if err != nil {
+		t.Fatalf("box.Seal: %v", err)
+	}
+
+	keyPath := filepath.Join(t.TempDir(), "smtp-password.key")
+	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)+"\n"), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	t.Setenv("RESEND_API_KEY", "")
+	t.Setenv("SMTP_HOST", "smtp.example.com")
+	t.Setenv("SMTP_PASSWORD", "")
+	t.Setenv("SMTP_PASSWORD_ENCRYPTED", base64.StdEncoding.EncodeToString(sealed))
+	t.Setenv("SMTP_PASSWORD_SECRET_KEY", "")
+	t.Setenv("SMTP_PASSWORD_SECRET_KEY_FILE", keyPath)
+
+	s := NewEmailService()
+	if s.smtpPassword != "file-key-pass" {
+		t.Fatalf("smtpPassword = %q, want decrypted password from key file", s.smtpPassword)
 	}
 }
 
@@ -614,6 +690,29 @@ func TestSendSMTP_PlainAuthSucceedsWithoutFallback(t *testing.T) {
 	err := s.sendSMTP("to@example.com", "Test Subject", "<p>Hello</p>")
 	if err != nil {
 		t.Fatalf("sendSMTP failed: %v", err)
+	}
+}
+
+func TestSendSMTP_TLSDisabledUsesLoginAuth(t *testing.T) {
+	srv, cleanup := startTestSMTPServer(t, testSMTPServer{
+		AuthMechs:    "LOGIN",
+		ExpectedUser: "testuser",
+		ExpectedPass: "testpass",
+	})
+	defer cleanup()
+	host, port, _ := net.SplitHostPort(srv.Addr)
+
+	s := &EmailService{
+		smtpHost:        host,
+		smtpPort:        port,
+		smtpUsername:    "testuser",
+		smtpPassword:    "testpass",
+		smtpTLSDisabled: true,
+	}
+
+	err := s.sendSMTP("to@example.com", "Test Subject", "<p>Hello</p>")
+	if err != nil {
+		t.Fatalf("sendSMTP failed with SMTP TLS disabled: %v", err)
 	}
 }
 

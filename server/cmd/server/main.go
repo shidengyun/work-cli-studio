@@ -256,7 +256,6 @@ func main() {
 	// so subscribers must be written first within the same synchronous event dispatch.
 	registerSubscriberListeners(bus, queries)
 	registerActivityListeners(bus, queries)
-	registerNotificationListeners(bus, queries)
 
 	metricsConfig := obsmetrics.ConfigFromEnv()
 	var metricsServer *http.Server
@@ -320,6 +319,7 @@ func main() {
 		DaemonWakeup:       daemonWakeup,
 		HeartbeatScheduler: heartbeatScheduler,
 	})
+	registerNotificationListeners(bus, queries, h.EmailService)
 
 	srv := &http.Server{
 		Addr:    ":" + port,

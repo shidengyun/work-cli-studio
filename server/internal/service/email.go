@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/multica-ai/multica/server/internal/util/secretbox"
 	"github.com/resend/resend-go/v2"
 )
 
@@ -32,7 +33,17 @@ type EmailService struct {
 	smtpPassword    string
 	smtpTLSInsecure bool
 	smtpTLSImplicit bool
+	smtpTLSDisabled bool
 	smtpEHLOName    string
+}
+
+type TaskStatusEmail struct {
+	To            string
+	WorkspaceName string
+	IssueTitle    string
+	IssueURL      string
+	Status        string
+	Error         string
 }
 
 type smtpAuthClient interface {
@@ -57,13 +68,14 @@ func isLocalhost(name string) bool {
 }
 
 type loginAuth struct {
-	username string
-	password string
-	host     string
+	username   string
+	password   string
+	host       string
+	allowPlain bool
 }
 
 func (a *loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
-	if !server.TLS && !isLocalhost(server.Name) {
+	if !server.TLS && !a.allowPlain && !isLocalhost(server.Name) {
 		return "", nil, fmt.Errorf("unencrypted connection")
 	}
 	if server.Name != a.host {
@@ -111,6 +123,58 @@ func smtpAuthWithFallback(c smtpAuthClient, host, username, password string) (bo
 	return true, plainErr
 }
 
+func smtpPasswordFromEnv() (string, error) {
+	if password := os.Getenv("SMTP_PASSWORD"); password != "" {
+		return password, nil
+	}
+
+	encrypted := strings.TrimSpace(os.Getenv("SMTP_PASSWORD_ENCRYPTED"))
+	if encrypted == "" {
+		return "", nil
+	}
+
+	key, err := smtpPasswordSecretKey()
+	if err != nil {
+		return "", err
+	}
+	box, err := secretbox.New(key)
+	if err != nil {
+		return "", err
+	}
+	sealed, err := base64.StdEncoding.DecodeString(encrypted)
+	if err != nil {
+		return "", fmt.Errorf("SMTP_PASSWORD_ENCRYPTED is not valid base64: %w", err)
+	}
+	plain, err := box.Open(sealed)
+	if err != nil {
+		return "", fmt.Errorf("SMTP_PASSWORD_ENCRYPTED decrypt failed: %w", err)
+	}
+	return string(plain), nil
+}
+
+func smtpPasswordSecretKey() ([]byte, error) {
+	if strings.TrimSpace(os.Getenv("SMTP_PASSWORD_SECRET_KEY")) != "" {
+		return secretbox.LoadKey("SMTP_PASSWORD_SECRET_KEY")
+	}
+
+	path := strings.TrimSpace(os.Getenv("SMTP_PASSWORD_SECRET_KEY_FILE"))
+	if path == "" {
+		return nil, fmt.Errorf("SMTP_PASSWORD_SECRET_KEY or SMTP_PASSWORD_SECRET_KEY_FILE is required when SMTP_PASSWORD_ENCRYPTED is set")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read SMTP_PASSWORD_SECRET_KEY_FILE: %w", err)
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return nil, fmt.Errorf("SMTP_PASSWORD_SECRET_KEY_FILE is not valid base64: %w", err)
+	}
+	if len(key) != secretbox.KeySize {
+		return nil, fmt.Errorf("SMTP_PASSWORD_SECRET_KEY_FILE decodes to %d bytes, expected %d", len(key), secretbox.KeySize)
+	}
+	return key, nil
+}
+
 func (s *EmailService) openSMTPClient() (*smtp.Client, error) {
 	addr := net.JoinHostPort(s.smtpHost, s.smtpPort)
 
@@ -148,7 +212,7 @@ func (s *EmailService) openSMTPClient() (*smtp.Client, error) {
 		}
 	}
 
-	if !s.smtpTLSImplicit {
+	if !s.smtpTLSImplicit && !s.smtpTLSDisabled {
 		if ok, _ := c.Extension("STARTTLS"); ok {
 			if err = c.StartTLS(tlsCfg); err != nil {
 				c.Close()
@@ -173,7 +237,10 @@ func NewEmailService() *EmailService {
 		smtpPort = "25"
 	}
 	smtpUsername := os.Getenv("SMTP_USERNAME")
-	smtpPassword := os.Getenv("SMTP_PASSWORD")
+	smtpPassword, smtpPasswordErr := smtpPasswordFromEnv()
+	if smtpPasswordErr != nil {
+		fmt.Printf("EmailService: SMTP password config ignored: %v\n", smtpPasswordErr)
+	}
 	smtpTLSInsecure := os.Getenv("SMTP_TLS_INSECURE") == "true"
 
 	// EHLO/HELO name, only relevant on the SMTP relay send path. net/smtp defaults
@@ -200,12 +267,15 @@ func NewEmailService() *EmailService {
 	// Required by providers like Aliyun enterprise mail that only offer port 465
 	// SSL and do not advertise STARTTLS. Default (empty / "starttls") preserves
 	// the prior STARTTLS-upgrade behavior.
+	// SMTP_TLS=none/plain/off disables STARTTLS for private relays that require
+	// plaintext AUTH on port 25.
 	smtpTLSMode := strings.ToLower(strings.TrimSpace(os.Getenv("SMTP_TLS")))
 	smtpTLSImplicit := smtpTLSMode == "implicit" || smtpTLSMode == "smtps" || smtpTLSMode == "ssl"
+	smtpTLSDisabled := smtpTLSMode == "none" || smtpTLSMode == "plain" || smtpTLSMode == "off"
 	if smtpTLSMode == "" && smtpPort == "465" {
 		smtpTLSImplicit = true
 	}
-	if smtpTLSMode != "" && !smtpTLSImplicit && smtpTLSMode != "starttls" {
+	if smtpTLSMode != "" && !smtpTLSImplicit && !smtpTLSDisabled && smtpTLSMode != "starttls" {
 		fmt.Printf("EmailService: SMTP_TLS=%q not recognized, falling back to starttls\n", smtpTLSMode)
 	}
 
@@ -219,6 +289,8 @@ func NewEmailService() *EmailService {
 		tlsLabel := "starttls"
 		if smtpTLSImplicit {
 			tlsLabel = "implicit-tls"
+		} else if smtpTLSDisabled {
+			tlsLabel = "plain"
 		}
 		fmt.Printf("EmailService: SMTP relay %s:%s (%s) from=%s\n", smtpHost, smtpPort, tlsLabel, from)
 	case client != nil:
@@ -236,6 +308,7 @@ func NewEmailService() *EmailService {
 		smtpPassword:    smtpPassword,
 		smtpTLSInsecure: smtpTLSInsecure,
 		smtpTLSImplicit: smtpTLSImplicit,
+		smtpTLSDisabled: smtpTLSDisabled,
 		smtpEHLOName:    smtpEHLOName,
 	}
 }
@@ -252,21 +325,27 @@ func (s *EmailService) sendSMTP(to, subject, htmlBody string) error {
 	defer c.Close()
 
 	if s.smtpUsername != "" {
-		fallbackToLogin, authErr := smtpAuthWithFallback(smtpClientAdapter{client: c}, s.smtpHost, s.smtpUsername, s.smtpPassword)
-		if authErr != nil {
-			if !fallbackToLogin {
-				return fmt.Errorf("smtp auth: %w", authErr)
+		if s.smtpTLSDisabled {
+			if err = c.Auth(&loginAuth{username: s.smtpUsername, password: s.smtpPassword, host: s.smtpHost, allowPlain: true}); err != nil {
+				return fmt.Errorf("smtp auth login: %w", err)
 			}
+		} else {
+			fallbackToLogin, authErr := smtpAuthWithFallback(smtpClientAdapter{client: c}, s.smtpHost, s.smtpUsername, s.smtpPassword)
+			if authErr != nil {
+				if !fallbackToLogin {
+					return fmt.Errorf("smtp auth: %w", authErr)
+				}
 
-			c.Close()
-			c, err = s.openSMTPClient()
-			if err != nil {
-				return fmt.Errorf("smtp auth: plain auth failed (%v); login reconnect failed: %w", authErr, err)
-			}
-			defer c.Close()
+				c.Close()
+				c, err = s.openSMTPClient()
+				if err != nil {
+					return fmt.Errorf("smtp auth: plain auth failed (%v); login reconnect failed: %w", authErr, err)
+				}
+				defer c.Close()
 
-			if err = c.Auth(&loginAuth{username: s.smtpUsername, password: s.smtpPassword, host: s.smtpHost}); err != nil {
-				return fmt.Errorf("smtp auth: plain auth failed (%v); login auth fallback failed: %w", authErr, err)
+				if err = c.Auth(&loginAuth{username: s.smtpUsername, password: s.smtpPassword, host: s.smtpHost}); err != nil {
+					return fmt.Errorf("smtp auth: plain auth failed (%v); login auth fallback failed: %w", authErr, err)
+				}
 			}
 		}
 	}
@@ -320,6 +399,24 @@ func (s *EmailService) sendSMTP(to, subject, htmlBody string) error {
 	return c.Quit()
 }
 
+func (s *EmailService) deliver(to, subject, htmlBody, devLabel string) error {
+	if s.smtpHost != "" {
+		return s.sendSMTP(to, subject, htmlBody)
+	}
+	if s.client == nil {
+		fmt.Printf("[DEV] %s email to %s: %s\n", devLabel, to, subject)
+		return nil
+	}
+	params := &resend.SendEmailRequest{
+		From:    s.fromEmail,
+		To:      []string{to},
+		Subject: subject,
+		Html:    htmlBody,
+	}
+	_, err := s.client.Emails.Send(params)
+	return err
+}
+
 // SendVerificationCode sends a one-time login code. The code is server-generated
 // (6-digit numeric) so no user-controlled text reaches the email body here.
 // Delivery priority: SMTP relay → Resend API → DEV stdout.
@@ -339,14 +436,7 @@ func (s *EmailService) SendVerificationCode(to, code string) error {
 		fmt.Printf("[DEV] Verification code for %s: %s\n", to, code)
 		return nil
 	}
-	params := &resend.SendEmailRequest{
-		From:    s.fromEmail,
-		To:      []string{to},
-		Subject: "Your Multica verification code",
-		Html:    body,
-	}
-	_, err := s.client.Emails.Send(params)
-	return err
+	return s.deliver(to, "Your Multica verification code", body, "verification code")
 }
 
 // SendInvitationEmail notifies the invitee that they have been invited to a workspace.
@@ -367,8 +457,46 @@ func (s *EmailService) SendInvitationEmail(to, inviterName, workspaceName, invit
 		return nil
 	}
 	params := buildInvitationParams(s.fromEmail, to, inviterName, workspaceName, inviteURL)
-	_, err := s.client.Emails.Send(params)
-	return err
+	return s.deliver(to, params.Subject, params.Html, "invitation")
+}
+
+func (s *EmailService) SendTaskStatusEmail(msg TaskStatusEmail) error {
+	subjectStatus := sanitizeSubjectField(msg.Status)
+	subjectIssue := sanitizeSubjectField(msg.IssueTitle)
+	subject := fmt.Sprintf("Multica task %s: %s", subjectStatus, subjectIssue)
+
+	safeWorkspace := html.EscapeString(msg.WorkspaceName)
+	safeIssueTitle := html.EscapeString(msg.IssueTitle)
+	safeStatus := html.EscapeString(msg.Status)
+	safeIssueURL := html.EscapeString(msg.IssueURL)
+	safeError := html.EscapeString(msg.Error)
+
+	body := fmt.Sprintf(
+		`<div style="font-family: sans-serif; max-width: 520px; margin: 0 auto;">
+			<h2>Task %s</h2>
+			<p>The task for <strong>%s</strong> in <strong>%s</strong> is now <strong>%s</strong>.</p>`,
+		safeStatus,
+		safeIssueTitle,
+		safeWorkspace,
+		safeStatus,
+	)
+	if safeError != "" {
+		body += fmt.Sprintf(
+			`<p style="padding: 12px; background: #fff5f5; border: 1px solid #fecaca; border-radius: 6px; color: #991b1b;">%s</p>`,
+			safeError,
+		)
+	}
+	if safeIssueURL != "" {
+		body += fmt.Sprintf(
+			`<p style="margin: 24px 0;">
+				<a href="%s" style="display: inline-block; padding: 12px 24px; background: #000; color: #fff; text-decoration: none; border-radius: 6px; font-weight: 500;">Open issue</a>
+			</p>`,
+			safeIssueURL,
+		)
+	}
+	body += `<p style="color: #666; font-size: 14px;">You are receiving this because you are subscribed to this issue.</p></div>`
+
+	return s.deliver(msg.To, subject, body, "task status")
 }
 
 // buildInvitationParams assembles the email request for an invitation.

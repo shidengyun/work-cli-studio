@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/url"
+	"os"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -18,7 +22,6 @@ type mention struct {
 	Type string // "member", "agent", "issue", or "all"
 	ID   string // user_id, agent_id, issue_id, or "all"
 }
-
 
 // statusLabels maps DB status values to human-readable labels for notifications.
 var statusLabels = map[string]string{
@@ -56,6 +59,110 @@ func priorityLabel(p string) string {
 
 var emptyDetails = []byte("{}")
 
+func taskStatusEmailService(emailServices []*service.EmailService) *service.EmailService {
+	if len(emailServices) == 0 {
+		return nil
+	}
+	return emailServices[0]
+}
+
+func frontendOriginForEmail() string {
+	origin := strings.TrimSpace(os.Getenv("FRONTEND_ORIGIN"))
+	if origin == "" {
+		origin = strings.TrimSpace(os.Getenv("MULTICA_APP_URL"))
+	}
+	if origin == "" {
+		origin = "https://app.multica.ai"
+	}
+	return strings.TrimRight(origin, "/")
+}
+
+func issueEmailURL(workspace db.Workspace, issue db.Issue) string {
+	if workspace.Slug == "" {
+		return ""
+	}
+	return frontendOriginForEmail() +
+		"/" + url.PathEscape(workspace.Slug) +
+		"/issues/" + url.PathEscape(util.UUIDToString(issue.ID))
+}
+
+func taskStatusFromEventType(eventType string) string {
+	switch eventType {
+	case protocol.EventTaskCompleted:
+		return "completed"
+	case protocol.EventTaskFailed:
+		return "failed"
+	default:
+		return strings.TrimPrefix(eventType, "task:")
+	}
+}
+
+func taskFailureText(payload map[string]any) string {
+	for _, key := range []string{"error", "err", "message", "failure_reason"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func sendTaskStatusEmails(
+	ctx context.Context,
+	queries *db.Queries,
+	emailSvc *service.EmailService,
+	e events.Event,
+	workspace db.Workspace,
+	issue db.Issue,
+	notifType string,
+	status string,
+	errorText string,
+) {
+	if emailSvc == nil {
+		return
+	}
+
+	rows, err := queries.ListIssueSubscriberMemberEmails(ctx, db.ListIssueSubscriberMemberEmailsParams{
+		IssueID:     issue.ID,
+		WorkspaceID: workspace.ID,
+	})
+	if err != nil {
+		slog.Error("task status email: failed to list member subscribers",
+			"issue_id", util.UUIDToString(issue.ID), "type", notifType, "error", err)
+		return
+	}
+
+	issueURL := issueEmailURL(workspace, issue)
+	for _, row := range rows {
+		recipientID := util.UUIDToString(row.UserID)
+		if recipientID == e.ActorID {
+			continue
+		}
+
+		var prefs map[string]string
+		if len(row.Preferences) > 0 {
+			if err := json.Unmarshal(row.Preferences, &prefs); err != nil {
+				slog.Warn("task status email: failed to parse notification preferences",
+					"user_id", recipientID, "error", err)
+			}
+		}
+		if isNotifMuted(prefs, notifType) {
+			continue
+		}
+
+		if err := emailSvc.SendTaskStatusEmail(service.TaskStatusEmail{
+			To:            row.Email,
+			WorkspaceName: workspace.Name,
+			IssueTitle:    issue.Title,
+			IssueURL:      issueURL,
+			Status:        status,
+			Error:         errorText,
+		}); err != nil {
+			slog.Error("task status email: send failed",
+				"to", row.Email, "issue_id", util.UUIDToString(issue.ID), "type", notifType, "error", err)
+		}
+	}
+}
+
 // parseMentions extracts mentions from markdown content.
 // Delegates to the shared util.ParseMentions and converts to the local type.
 func parseMentions(content string) []mention {
@@ -78,19 +185,19 @@ var parentBubbleNotifTypes = map[string]bool{
 // notifTypeToGroup maps each InboxItemType to a user-configurable preference
 // group. Types not in this map are always delivered (not configurable).
 var notifTypeToGroup = map[string]string{
-	"issue_assigned":  "assignments",
-	"unassigned":      "assignments",
-	"assignee_changed": "assignments",
-	"status_changed":  "status_changes",
-	"new_comment":     "comments",
-	"mentioned":       "comments",
-	"priority_changed": "updates",
+	"issue_assigned":     "assignments",
+	"unassigned":         "assignments",
+	"assignee_changed":   "assignments",
+	"status_changed":     "status_changes",
+	"new_comment":        "comments",
+	"mentioned":          "comments",
+	"priority_changed":   "updates",
 	"start_date_changed": "updates",
-	"due_date_changed": "updates",
-	"task_completed":  "agent_activity",
-	"task_failed":     "agent_activity",
-	"agent_blocked":   "agent_activity",
-	"agent_completed": "agent_activity",
+	"due_date_changed":   "updates",
+	"task_completed":     "agent_activity",
+	"task_failed":        "agent_activity",
+	"agent_blocked":      "agent_activity",
+	"agent_completed":    "agent_activity",
 }
 
 // isNotifMuted returns true if the given notification type is muted for a user
@@ -541,8 +648,9 @@ func notifyMentionedMembers(
 // NOTE: uses context.Background() because the event bus dispatches synchronously
 // within the HTTP request goroutine. Adding per-handler timeouts is a bus-level
 // concern — see events.Bus for future improvements.
-func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
+func registerNotificationListeners(bus *events.Bus, queries *db.Queries, emailServices ...*service.EmailService) {
 	ctx := context.Background()
+	emailSvc := taskStatusEmailService(emailServices)
 
 	// issue:created — Direct notification to assignee if assignee != actor
 	bus.Subscribe(protocol.EventIssueCreated, func(e events.Event) {
@@ -883,6 +991,31 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 	})
 
 	// task:completed — no inbox notification (completion is visible from status change)
+	bus.Subscribe(protocol.EventTaskCompleted, func(e events.Event) {
+		payload, ok := e.Payload.(map[string]any)
+		if !ok {
+			return
+		}
+		issueID, _ := payload["issue_id"].(string)
+		if issueID == "" {
+			return
+		}
+
+		issue, err := queries.GetIssue(ctx, parseUUID(issueID))
+		if err != nil {
+			slog.Error("task:completed email: failed to get issue", "issue_id", issueID, "error", err)
+			return
+		}
+		workspace, err := queries.GetWorkspace(ctx, issue.WorkspaceID)
+		if err != nil {
+			slog.Error("task:completed email: failed to get workspace",
+				"workspace_id", e.WorkspaceID, "issue_id", issueID, "error", err)
+			return
+		}
+
+		sendTaskStatusEmails(ctx, queries, emailSvc, e, workspace, issue,
+			"task_completed", taskStatusFromEventType(e.Type), "")
+	})
 
 	// task:failed — notify all subscribers except the agent
 	bus.Subscribe(protocol.EventTaskFailed, func(e events.Event) {
@@ -900,6 +1033,14 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 		if err != nil {
 			slog.Error("task:failed notification: failed to get issue", "issue_id", issueID, "error", err)
 			return
+		}
+		workspace, err := queries.GetWorkspace(ctx, issue.WorkspaceID)
+		if err != nil {
+			slog.Error("task:failed email: failed to get workspace",
+				"workspace_id", e.WorkspaceID, "issue_id", issueID, "error", err)
+		} else {
+			sendTaskStatusEmails(ctx, queries, emailSvc, e, workspace, issue,
+				"task_failed", taskStatusFromEventType(e.Type), taskFailureText(payload))
 		}
 
 		exclude := map[string]bool{}
