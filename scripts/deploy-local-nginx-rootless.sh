@@ -66,6 +66,24 @@ require_cmd nc
 require_cmd rsync
 require_cmd curl
 
+append_no_proxy_hosts() {
+  local current="${NO_PROXY:-${no_proxy:-}}"
+  local host
+
+  current="${current%,}"
+  for host in "$@"; do
+    case ",${current}," in
+      *",${host},"*) ;;
+      *) current="${current:+${current},}${host}" ;;
+    esac
+  done
+
+  export NO_PROXY="$current"
+  export no_proxy="$current"
+}
+
+append_no_proxy_hosts localhost 127.0.0.1 ::1
+
 if [ -z "$NGINX_BIN" ]; then
   echo "nginx not found in PATH" >&2
   exit 1
@@ -346,11 +364,11 @@ log "Smoke test"
 # probes and nginx returns an empty reply (curl exit 52).
 SMOKE_OK=0
 for i in $(seq 1 60); do
-  if curl -fsS  --max-time 5 -H "Connection: close" \
+  if curl -fsS --noproxy "*" --max-time 5 -H "Connection: close" \
        "http://127.0.0.1:${BACKEND_PORT}/health" >/dev/null 2>&1 \
-    && curl -fsS --max-time 5 -H "Connection: close" \
+    && curl -fsS --noproxy "*" --max-time 5 -H "Connection: close" \
        "http://127.0.0.1:${WEB_PORT}/" >/dev/null 2>&1 \
-    && curl -fsS --max-time 5 -H "Connection: close" \
+    && curl -fsS --noproxy "*" --max-time 5 -H "Connection: close" \
        "$PUBLIC_ORIGIN/" >/dev/null 2>&1; then
     SMOKE_OK=1
     break
