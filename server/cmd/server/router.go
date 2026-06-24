@@ -21,6 +21,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/featureflagdispatch"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
@@ -31,6 +32,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/internal/util/secretbox"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/featureflag"
 )
 
 var defaultOrigins = []string{
@@ -142,6 +144,7 @@ type RouterOptions struct {
 	BusinessMetrics *obsmetrics.BusinessMetrics
 	DaemonHub       *daemonws.Hub
 	DaemonWakeup    service.TaskWakeupNotifier
+	FeatureFlags    *featureflag.Service
 	// HeartbeatScheduler, when non-nil, replaces the default synchronous
 	// passthrough scheduler on the constructed Handler. main.go injects a
 	// BatchedHeartbeatScheduler here so the caller can also drive Run/Stop;
@@ -193,6 +196,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
 	h.Metrics = opts.BusinessMetrics
+	if opts.FeatureFlags != nil {
+		h.DaemonFeatureFlags = featureflagdispatch.NewEvaluator(opts.FeatureFlags)
+	}
 	h.TaskService.Metrics = opts.BusinessMetrics
 	h.IssueService.Metrics = opts.BusinessMetrics
 	if opts.BusinessMetrics != nil {
@@ -261,13 +267,20 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					Logger:  slog.Default(),
 				})
 				h.LarkAPIClient = larkClient
-				patcher := lark.NewPatcher(queries, installSvc, larkClient, lark.PatcherConfig{})
+
+				// Channel-backed store: routes the lark package's DB seams
+				// onto the channel_* tables (MUL-3515). Interface-wired
+				// consumers (patcher, typing indicator, dispatcher, hub,
+				// backfills) take it directly; the constructor-based services
+				// wrap *db.Queries internally, so they keep taking queries.
+				cs := lark.NewChannelStore(queries)
+				patcher := lark.NewPatcher(cs, installSvc, larkClient, lark.PatcherConfig{})
 				patcher.Register(bus)
 
 				// Typing indicator: shows a "processing" reaction on the user's
 				// message while the agent is working, then removes it before the
 				// reply is sent. Best-effort; failures are logged only.
-				typingIndicator := lark.NewTypingIndicatorManager(larkClient, installSvc, queries, slog.Default())
+				typingIndicator := lark.NewTypingIndicatorManager(larkClient, installSvc, cs, slog.Default())
 				patcher.SetTypingIndicatorManager(typingIndicator)
 
 				// Inbound pipeline: lark_inbound_audit logger,
@@ -281,7 +294,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				auditLogger := lark.NewAuditLogger(queries)
 				chatSvc := lark.NewChatSessionService(queries, pool)
 				dispatcher := &lark.Dispatcher{
-					Queries:      queries,
+					Queries:      cs,
 					Chat:         chatSvc,
 					Audit:        auditLogger,
 					IssueService: h.IssueService,
@@ -308,7 +321,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// config is fixed, with the boot log labelling the mode
 				// "noop" so operators can spot it.
 				connectorFactory, connectorLabel := buildLarkConnectorFactory(installSvc, larkClient)
-				h.LarkHub = lark.NewHub(queries, connectorFactory, dispatcher, lark.HubConfig{})
+				h.LarkHub = lark.NewHub(cs, connectorFactory, dispatcher, lark.HubConfig{})
 				h.LarkHub.SetTypingIndicatorManager(typingIndicator)
 
 				// OutcomeReplier wires the outbound side of the
@@ -343,7 +356,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// bot_union_id during the device-flow finalize, so this
 				// is bridge code — it will simply find no rows to update
 				// on a fresh deployment and exit. MUL-2671.
-				go lark.BackfillBotUnionIDs(context.Background(), queries, larkClient, installSvc, slog.Default())
+				go lark.BackfillBotUnionIDs(context.Background(), cs, larkClient, installSvc, slog.Default())
 
 				// Upgrade repair for deployments that ran the whole
 				// integration against Lark international via the deployment-
@@ -353,7 +366,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// operator clears the override. No-op on mainland / fresh
 				// deployments. Off the hot startup path like the union_id
 				// backfill. MUL-3083.
-				go lark.BackfillRegionFromLegacyOverride(context.Background(), queries,
+				go lark.BackfillRegionFromLegacyOverride(context.Background(), cs,
 					strings.TrimSpace(os.Getenv("MULTICA_LARK_HTTP_BASE_URL")),
 					strings.TrimSpace(os.Getenv("MULTICA_LARK_CALLBACK_BASE_URL")),
 					slog.Default())
@@ -1071,7 +1084,10 @@ func buildLarkConnectorFactory(installSvc *lark.InstallationService, apiClient l
 	}
 	decoder := lark.NewLarkJSONFrameDecoder()
 	dialer := lark.NewGorillaDialer()
-	credsProvider := lark.CredentialsProviderFunc(func(ctx context.Context, inst db.LarkInstallation) (lark.InstallationCredentials, error) {
+	if proxyURL := strings.TrimSpace(os.Getenv("MULTICA_LARK_WS_PROXY_URL")); proxyURL != "" {
+		dialer.ProxyURL = proxyURL
+	}
+	credsProvider := lark.CredentialsProviderFunc(func(ctx context.Context, inst lark.Installation) (lark.InstallationCredentials, error) {
 		secret, err := installSvc.DecryptAppSecret(inst)
 		if err != nil {
 			return lark.InstallationCredentials{}, err
@@ -1107,7 +1123,7 @@ func buildLarkConnectorFactory(installSvc *lark.InstallationService, apiClient l
 		slog.Error("lark ws: connector init failed; falling back to noop", "error", err)
 		return lark.NoopConnectorFactory(slog.Default()), "noop"
 	}
-	return func(_ db.LarkInstallation) (lark.EventConnector, error) {
+	return func(_ lark.Installation) (lark.EventConnector, error) {
 		return conn, nil
 	}, "ws-long-conn"
 }
