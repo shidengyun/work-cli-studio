@@ -341,18 +341,31 @@ launchctl load "$WEB_PLIST"
 launchctl load "$NGINX_PLIST"
 
 log "Smoke test"
-for i in $(seq 1 45); do
-  if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/health" >/dev/null 2>&1 \
-    && curl -fsSI "http://127.0.0.1:${WEB_PORT}" >/dev/null 2>&1 \
-    && curl -fsSI "$PUBLIC_ORIGIN" >/dev/null 2>&1; then
+# Disable keep-alive (-H "Connection: close") so each probe makes a fresh TCP
+# connection and avoids a race where Next.js drops the idle socket between
+# probes and nginx returns an empty reply (curl exit 52).
+SMOKE_OK=0
+for i in $(seq 1 60); do
+  if curl -fsS  --max-time 5 -H "Connection: close" \
+       "http://127.0.0.1:${BACKEND_PORT}/health" >/dev/null 2>&1 \
+    && curl -fsS --max-time 5 -H "Connection: close" \
+       "http://127.0.0.1:${WEB_PORT}/" >/dev/null 2>&1 \
+    && curl -fsS --max-time 5 -H "Connection: close" \
+       "$PUBLIC_ORIGIN/" >/dev/null 2>&1; then
+    SMOKE_OK=1
     break
   fi
   sleep 1
 done
 
-curl -fsS "http://127.0.0.1:${BACKEND_PORT}/health" >/dev/null
-curl -fsSI "http://127.0.0.1:${WEB_PORT}" >/dev/null
-curl -fsSI "$PUBLIC_ORIGIN" >/dev/null
+if [ "$SMOKE_OK" -ne 1 ]; then
+  echo "✗ Smoke test failed after 60s." >&2
+  echo "  Inspect logs:" >&2
+  echo "    tail -50 ${DEPLOY_DIR}/backend.err.log" >&2
+  echo "    tail -50 ${DEPLOY_DIR}/web.err.log" >&2
+  echo "    tail -50 ${NGINX_PREFIX}/logs/error.log" >&2
+  exit 1
+fi
 
 cat <<DONE
 
