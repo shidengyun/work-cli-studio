@@ -461,6 +461,29 @@ func TestBuildTaskStatusEmailHTML_TruncatesLongResult(t *testing.T) {
 	}
 }
 
+func TestBuildTaskStatusEmailHTML_IncludesEscapedRedactedTranscript(t *testing.T) {
+	body := buildTaskStatusEmailHTML(TaskStatusEmail{
+		WorkspaceName: "Acme",
+		IssueTitle:    "Customer import",
+		Status:        "completed",
+		Transcript:    "Tool finished: go test\nok <all>\nAPI_KEY=secret",
+	})
+
+	for _, want := range []string{
+		"Execution log",
+		"Tool finished: go test",
+		"ok &lt;all&gt;",
+		"[REDACTED CREDENTIAL]",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q\nbody: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "<all>") || strings.Contains(body, "secret") {
+		t.Fatalf("body contains raw transcript content\nbody: %s", body)
+	}
+}
+
 // --- loginAuth.Start security tests ---
 
 func TestLoginAuth_Start_RefusesUnencryptedRemote(t *testing.T) {
