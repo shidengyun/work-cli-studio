@@ -39,6 +39,42 @@ var defaultOrigins = []string{
 	"http://localhost:5174", // electron-vite dev (fallback port)
 }
 
+var superAdminIssueReadPrefixes = []string{
+	"/api/assignee-frequency",
+	"/api/agent-task-snapshot",
+	"/api/attachments/",
+	"/api/issues",
+	"/api/labels",
+	"/api/projects",
+	"/api/squads",
+	"/api/tasks/",
+	"/api/agents",
+}
+
+func allowSuperAdminIssueRead(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+		return false
+	}
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/api/workspaces/") {
+		rest := strings.TrimPrefix(path, "/api/workspaces/")
+		parts := strings.Split(strings.Trim(rest, "/"), "/")
+		return len(parts) == 1 || (len(parts) == 2 && parts[1] == "members")
+	}
+	for _, prefix := range superAdminIssueReadPrefixes {
+		if path == strings.TrimSuffix(prefix, "/") || strings.HasPrefix(path, prefix) {
+			if strings.HasPrefix(path, "/api/agents/") && strings.HasSuffix(path, "/env") {
+				return false
+			}
+			if strings.HasPrefix(path, "/api/projects/") && strings.Contains(path, "/resources") {
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
+
 func allowedOrigins() []string {
 	raw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
 	if raw == "" {
@@ -146,6 +182,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		AllowSignup:              os.Getenv("ALLOW_SIGNUP") != "false",
 		AllowedEmails:            splitAndTrim(os.Getenv("ALLOWED_EMAILS")),
 		AllowedEmailDomains:      splitAndTrim(os.Getenv("ALLOWED_EMAIL_DOMAINS")),
+		SuperAdminEmails:         splitAndTrim(os.Getenv("MULTICA_SUPER_ADMIN_EMAILS")),
 		DisableWorkspaceCreation: os.Getenv("DISABLE_WORKSPACE_CREATION") == "true",
 		PublicURL:                strings.TrimRight(strings.TrimSpace(os.Getenv("MULTICA_PUBLIC_URL")), "/"),
 		TrustedProxies:           parseTrustedProxies(os.Getenv("MULTICA_TRUSTED_PROXIES")),
@@ -571,7 +608,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Route("/{id}", func(r chi.Router) {
 				// Member-level access
 				r.Group(func(r chi.Router) {
-					r.Use(middleware.RequireWorkspaceMemberFromURL(queries, "id"))
+					r.Use(middleware.RequireWorkspaceMemberFromURLWithSuperAdminReadGate(queries, "id", h.IsSuperAdminRequest, allowSuperAdminIssueRead))
 					r.Get("/", h.GetWorkspace)
 					r.Get("/members", h.ListMembersWithUser)
 					r.Post("/leave", h.LeaveWorkspace)
@@ -700,7 +737,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 		// --- Workspace-scoped routes (all require workspace membership) ---
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.RequireWorkspaceMember(queries))
+			r.Use(middleware.RequireWorkspaceMemberWithSuperAdminReadGate(queries, h.IsSuperAdminRequest, allowSuperAdminIssueRead))
 
 			// Assignee frequency
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)

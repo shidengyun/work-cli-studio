@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -52,12 +53,15 @@ type Config struct {
 	AllowSignup         bool
 	AllowedEmails       []string
 	AllowedEmailDomains []string
+	// SuperAdminEmails grants instance-level read access across workspaces.
+	// Super admins are not workspace owners/admins: mutation routes still use
+	// membership and role checks.
+	SuperAdminEmails []string
 	// DisableWorkspaceCreation, when true, makes POST /api/workspaces return
-	// 403 for every caller. There is no role/owner exception because the repo
-	// has no platform-admin concept; operators bootstrap the workspace with
-	// the flag off, then flip it on and restart so subsequent users join via
-	// invitation only. The public /api/config endpoint mirrors this flag so
-	// the UI can hide every "Create workspace" affordance — see #3433.
+	// 403 for every caller. Operators bootstrap the workspace with the flag
+	// off, then flip it on and restart so subsequent users join via invitation
+	// only. The public /api/config endpoint mirrors this flag so the UI can hide
+	// every "Create workspace" affordance — see #3433.
 	DisableWorkspaceCreation bool
 	// PublicURL is the absolute base URL the API is reachable at from the
 	// public internet, with no trailing slash (e.g. "https://app.multica.ai").
@@ -250,6 +254,31 @@ func writeMeasuredJSON(w http.ResponseWriter, status int, v any) (int, error) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func (h *Handler) IsSuperAdminRequest(r *http.Request) bool {
+	if len(h.cfg.SuperAdminEmails) == 0 || r.Header.Get("X-Actor-Source") == "task_token" {
+		return false
+	}
+	userID := r.Header.Get("X-User-ID")
+	if userID == "" {
+		return false
+	}
+	userUUID, err := util.ParseUUID(userID)
+	if err != nil {
+		return false
+	}
+	user, err := h.Queries.GetUser(r.Context(), userUUID)
+	if err != nil {
+		return false
+	}
+	email := strings.ToLower(strings.TrimSpace(user.Email))
+	for _, allowed := range h.cfg.SuperAdminEmails {
+		if email == strings.ToLower(strings.TrimSpace(allowed)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Thin wrappers around util functions.

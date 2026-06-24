@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -16,6 +18,7 @@ type contextKey int
 const (
 	ctxKeyWorkspaceID contextKey = iota
 	ctxKeyMember
+	ctxKeySuperAdminRead
 )
 
 // MemberFromContext returns the workspace member injected by the workspace middleware.
@@ -30,12 +33,31 @@ func WorkspaceIDFromContext(ctx context.Context) string {
 	return id
 }
 
+// SuperAdminReadFromContext reports whether a read-only request was authorized
+// through the instance-level super-admin bypass rather than workspace membership.
+func SuperAdminReadFromContext(ctx context.Context) bool {
+	ok, _ := ctx.Value(ctxKeySuperAdminRead).(bool)
+	return ok
+}
+
 // SetMemberContext injects workspace ID and member into the context.
 // This is useful for handlers that resolve the workspace from an entity lookup
 // and want to share the member with downstream code.
 func SetMemberContext(ctx context.Context, workspaceID string, member db.Member) context.Context {
 	ctx = context.WithValue(ctx, ctxKeyWorkspaceID, workspaceID)
 	ctx = context.WithValue(ctx, ctxKeyMember, member)
+	return ctx
+}
+
+func SetSuperAdminReadContext(ctx context.Context, workspaceID string, userID pgtype.UUID) context.Context {
+	workspaceUUID, _ := util.ParseUUID(workspaceID)
+	ctx = context.WithValue(ctx, ctxKeyWorkspaceID, workspaceID)
+	ctx = context.WithValue(ctx, ctxKeyMember, db.Member{
+		WorkspaceID: workspaceUUID,
+		UserID:      userID,
+		Role:        "member",
+	})
+	ctx = context.WithValue(ctx, ctxKeySuperAdminRead, true)
 	return ctx
 }
 
@@ -159,13 +181,13 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // (fallback), validates membership, and injects the member and workspace ID
 // into the request context.
 func RequireWorkspaceMember(queries *db.Queries) func(http.Handler) http.Handler {
-	return buildMiddleware(queries, resolveWorkspaceUUID(queries), nil)
+	return buildMiddleware(queries, resolveWorkspaceUUID(queries), nil, nil, nil)
 }
 
 // RequireWorkspaceRole is like RequireWorkspaceMember but additionally checks
 // that the member has one of the specified roles.
 func RequireWorkspaceRole(queries *db.Queries, roles ...string) func(http.Handler) http.Handler {
-	return buildMiddleware(queries, resolveWorkspaceUUID(queries), roles)
+	return buildMiddleware(queries, resolveWorkspaceUUID(queries), roles, nil, nil)
 }
 
 // RequireWorkspaceMemberFromURL resolves the workspace ID from a chi URL
@@ -177,7 +199,7 @@ func RequireWorkspaceMemberFromURL(queries *db.Queries, param string) func(http.
 			return "", nil
 		}
 		return id, nil
-	}, nil)
+	}, nil, nil, nil)
 }
 
 // RequireWorkspaceRoleFromURL is like RequireWorkspaceMemberFromURL but
@@ -189,10 +211,35 @@ func RequireWorkspaceRoleFromURL(queries *db.Queries, param string, roles ...str
 			return "", nil
 		}
 		return id, nil
-	}, roles)
+	}, roles, nil, nil)
 }
 
-func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []string) func(http.Handler) http.Handler {
+type SuperAdminChecker func(*http.Request) bool
+type SuperAdminReadGate func(*http.Request) bool
+
+func RequireWorkspaceMemberWithSuperAdmin(queries *db.Queries, isSuperAdmin SuperAdminChecker) func(http.Handler) http.Handler {
+	return RequireWorkspaceMemberWithSuperAdminReadGate(queries, isSuperAdmin, nil)
+}
+
+func RequireWorkspaceMemberWithSuperAdminReadGate(queries *db.Queries, isSuperAdmin SuperAdminChecker, allowRead SuperAdminReadGate) func(http.Handler) http.Handler {
+	return buildMiddleware(queries, resolveWorkspaceUUID(queries), nil, isSuperAdmin, allowRead)
+}
+
+func RequireWorkspaceMemberFromURLWithSuperAdmin(queries *db.Queries, param string, isSuperAdmin SuperAdminChecker) func(http.Handler) http.Handler {
+	return RequireWorkspaceMemberFromURLWithSuperAdminReadGate(queries, param, isSuperAdmin, nil)
+}
+
+func RequireWorkspaceMemberFromURLWithSuperAdminReadGate(queries *db.Queries, param string, isSuperAdmin SuperAdminChecker, allowRead SuperAdminReadGate) func(http.Handler) http.Handler {
+	return buildMiddleware(queries, func(r *http.Request) (string, error) {
+		id := chi.URLParam(r, param)
+		if id == "" {
+			return "", nil
+		}
+		return id, nil
+	}, nil, isSuperAdmin, allowRead)
+}
+
+func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []string, isSuperAdmin SuperAdminChecker, allowSuperAdminRead SuperAdminReadGate) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			workspaceID, resolveErr := resolve(r)
@@ -240,6 +287,12 @@ func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []str
 				WorkspaceID: wsUUID,
 			})
 			if err != nil {
+				allowRead := allowSuperAdminRead == nil || allowSuperAdminRead(r)
+				if len(roles) == 0 && isReadMethod(r.Method) && allowRead && isSuperAdmin != nil && isSuperAdmin(r) {
+					ctx := SetSuperAdminReadContext(r.Context(), workspaceID, userUUID)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
 				writeError(w, http.StatusNotFound, "workspace not found")
 				return
 			}
@@ -261,5 +314,14 @@ func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []str
 			ctx := SetMemberContext(r.Context(), workspaceID, member)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}
+}
+
+func isReadMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
 	}
 }

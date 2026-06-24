@@ -170,6 +170,35 @@ func (h *Handler) labelsByIssue(ctx context.Context, wsUUID pgtype.UUID, issueID
 	return out
 }
 
+func (h *Handler) labelsByIssueAcrossWorkspaces(ctx context.Context, issues []db.ListIssuesRow) map[string][]LabelResponse {
+	out := map[string][]LabelResponse{}
+	idsByWorkspace := map[string][]pgtype.UUID{}
+	workspaceUUIDs := map[string]pgtype.UUID{}
+	for _, issue := range issues {
+		wsID := uuidToString(issue.WorkspaceID)
+		idsByWorkspace[wsID] = append(idsByWorkspace[wsID], issue.ID)
+		workspaceUUIDs[wsID] = issue.WorkspaceID
+	}
+	for wsID, ids := range idsByWorkspace {
+		for issueID, labels := range h.labelsByIssue(ctx, workspaceUUIDs[wsID], ids) {
+			out[issueID] = labels
+		}
+	}
+	return out
+}
+
+func (h *Handler) issuePrefixesByWorkspace(ctx context.Context, issues []db.ListIssuesRow) map[string]string {
+	out := map[string]string{}
+	for _, issue := range issues {
+		wsID := uuidToString(issue.WorkspaceID)
+		if _, ok := out[wsID]; ok {
+			continue
+		}
+		out[wsID] = h.getIssuePrefix(ctx, issue.WorkspaceID)
+	}
+	return out
+}
+
 func openIssueRowToResponse(i db.ListOpenIssuesRow, issuePrefix string) IssueResponse {
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	return IssueResponse{
@@ -725,6 +754,12 @@ func (h *Handler) SearchIssues(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	allWorkspaces := r.URL.Query().Get("all_workspaces") == "true"
+	if allWorkspaces && !h.IsSuperAdminRequest(r) {
+		writeError(w, http.StatusForbidden, "super admin access required")
+		return
+	}
+
 	workspaceID := h.resolveWorkspaceID(r)
 	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
 	if !ok {
@@ -797,8 +832,10 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	openOnly := r.URL.Query().Get("open_only") == "true"
+
 	// open_only=true returns all non-done/cancelled issues (no limit).
-	if r.URL.Query().Get("open_only") == "true" {
+	if openOnly && !allWorkspaces {
 		issues, err := h.Queries.ListOpenIssues(ctx, db.ListOpenIssuesParams{
 			WorkspaceID:    wsUUID,
 			Priority:       priorityFilter,
@@ -898,8 +935,14 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build dynamic SQL — same approach as ListGroupedIssues.
-	where := []string{"i.workspace_id = $1"}
-	args := []any{wsUUID}
+	where := []string{}
+	args := []any{}
+	workspaceRef := "i.workspace_id"
+	if !allWorkspaces {
+		where = append(where, "i.workspace_id = $1")
+		args = append(args, wsUUID)
+		workspaceRef = "$1"
+	}
 	addArg := func(v any) string {
 		args = append(args, v)
 		return "$" + strconv.Itoa(len(args))
@@ -926,6 +969,9 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	if scheduledFilter.Valid {
 		where = append(where, "(i.start_date IS NOT NULL OR i.due_date IS NOT NULL)")
 	}
+	if openOnly {
+		where = append(where, "i.status NOT IN ('done', 'cancelled')")
+	}
 	if metadataFilter != nil {
 		where = append(where, fmt.Sprintf("i.metadata @> %s::jsonb", addArg(string(metadataFilter))))
 	}
@@ -935,36 +981,39 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 		where = append(where, fmt.Sprintf(`(
     (i.assignee_type = 'agent' AND i.assignee_id IN (
        SELECT a.id FROM agent a
-        WHERE a.workspace_id = $1
+        WHERE a.workspace_id = %[2]s
           AND a.owner_id     = %[1]s::uuid
     ))
     OR (i.assignee_type = 'squad' AND i.assignee_id IN (
        SELECT sm.squad_id
          FROM squad_member sm
          JOIN squad s ON s.id = sm.squad_id
-        WHERE s.workspace_id = $1
+        WHERE s.workspace_id = %[2]s
           AND sm.member_type = 'member'
           AND sm.member_id   = %[1]s::uuid
        UNION
        SELECT s.id
          FROM squad s
          JOIN agent a ON a.id = s.leader_id
-        WHERE s.workspace_id = $1
-          AND a.workspace_id = $1
+        WHERE s.workspace_id = %[2]s
+          AND a.workspace_id = %[2]s
           AND a.owner_id     = %[1]s::uuid
        UNION
        SELECT sm.squad_id
          FROM squad_member sm
          JOIN squad s ON s.id = sm.squad_id
          JOIN agent a ON a.id = sm.member_id
-        WHERE s.workspace_id = $1
+        WHERE s.workspace_id = %[2]s
           AND sm.member_type = 'agent'
-          AND a.workspace_id = $1
+          AND a.workspace_id = %[2]s
           AND a.owner_id     = %[1]s::uuid
     ))
-)`, ref))
+)`, ref, workspaceRef))
 	}
 
+	if len(where) == 0 {
+		where = append(where, "TRUE")
+	}
 	whereSql := strings.Join(where, " AND ")
 
 	// Build ORDER BY clause.
@@ -983,7 +1032,7 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 
 	query := fmt.Sprintf(`SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
        i.assignee_type, i.assignee_id, i.creator_type, i.creator_id,
-       i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata
+       i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage
 FROM issue i
 WHERE %s
 ORDER BY %s
@@ -1020,6 +1069,7 @@ LIMIT %s OFFSET %s`, whereSql, orderBy, limitRef, offsetRef)
 			&row.Number,
 			&row.ProjectID,
 			&row.Metadata,
+			&row.Stage,
 		); err != nil {
 			slog.Warn("ListIssues scan failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to list issues")
@@ -1042,14 +1092,18 @@ LIMIT %s OFFSET %s`, whereSql, orderBy, limitRef, offsetRef)
 		total = int64(len(issues))
 	}
 
-	prefix := h.getIssuePrefix(ctx, wsUUID)
 	ids := make([]pgtype.UUID, len(issues))
 	for i, issue := range issues {
 		ids[i] = issue.ID
 	}
+	prefixesByWorkspace := h.issuePrefixesByWorkspace(ctx, issues)
 	labelsMap := h.labelsByIssue(ctx, wsUUID, ids)
+	if allWorkspaces {
+		labelsMap = h.labelsByIssueAcrossWorkspaces(ctx, issues)
+	}
 	resp := make([]IssueResponse, len(issues))
 	for i, issue := range issues {
+		prefix := prefixesByWorkspace[uuidToString(issue.WorkspaceID)]
 		resp[i] = issueListRowToResponse(issue, prefix)
 		labels := labelsMap[resp[i].ID]
 		if labels == nil {

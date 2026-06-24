@@ -169,6 +169,47 @@ func (q *Queries) ListWorkspaces(ctx context.Context, userID pgtype.UUID) ([]Wor
 	return items, nil
 }
 
+const listAllWorkspaces = `-- name: ListAllWorkspaces :many
+SELECT id, name, slug, description, settings,
+       created_at, updated_at, context, repos,
+       issue_prefix, issue_counter, avatar_url
+FROM workspace
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListAllWorkspaces(ctx context.Context) ([]Workspace, error) {
+	rows, err := q.db.Query(ctx, listAllWorkspaces)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Workspace{}
+	for rows.Next() {
+		var i Workspace
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Slug,
+			&i.Description,
+			&i.Settings,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Context,
+			&i.Repos,
+			&i.IssuePrefix,
+			&i.IssueCounter,
+			&i.AvatarUrl,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWorkspacesWithRepos = `-- name: ListWorkspacesWithRepos :many
 SELECT id, repos FROM workspace
 WHERE repos IS NOT NULL AND repos <> '[]'::jsonb
