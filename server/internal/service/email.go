@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/multica-ai/multica/server/internal/util/secretbox"
+	"github.com/multica-ai/multica/server/pkg/redact"
 	"github.com/resend/resend-go/v2"
 )
 
@@ -23,6 +24,7 @@ import (
 // inviter name) can land in an email Subject. Prevents attackers from stuffing
 // a full phishing pitch into a workspace name that gets sent from our domain.
 const maxSubjectFieldRunes = 60
+const maxTaskResultEmailRunes = 4000
 
 type EmailService struct {
 	client          *resend.Client
@@ -44,6 +46,7 @@ type TaskStatusEmail struct {
 	IssueURL      string
 	Status        string
 	Error         string
+	Result        string
 }
 
 type smtpAuthClient interface {
@@ -465,11 +468,17 @@ func (s *EmailService) SendTaskStatusEmail(msg TaskStatusEmail) error {
 	subjectIssue := sanitizeSubjectField(msg.IssueTitle)
 	subject := fmt.Sprintf("Multica task %s: %s", subjectStatus, subjectIssue)
 
+	body := buildTaskStatusEmailHTML(msg)
+	return s.deliver(msg.To, subject, body, "task status")
+}
+
+func buildTaskStatusEmailHTML(msg TaskStatusEmail) string {
 	safeWorkspace := html.EscapeString(msg.WorkspaceName)
 	safeIssueTitle := html.EscapeString(msg.IssueTitle)
 	safeStatus := html.EscapeString(msg.Status)
 	safeIssueURL := html.EscapeString(msg.IssueURL)
 	safeError := html.EscapeString(msg.Error)
+	safeResult := html.EscapeString(truncateEmailText(redact.Text(msg.Result), maxTaskResultEmailRunes))
 
 	body := fmt.Sprintf(
 		`<div style="font-family: sans-serif; max-width: 520px; margin: 0 auto;">
@@ -486,6 +495,13 @@ func (s *EmailService) SendTaskStatusEmail(msg TaskStatusEmail) error {
 			safeError,
 		)
 	}
+	if safeResult != "" {
+		body += fmt.Sprintf(
+			`<h3 style="margin-top: 24px;">Result</h3>
+			<pre style="white-space: pre-wrap; word-break: break-word; padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; color: #0f172a;">%s</pre>`,
+			safeResult,
+		)
+	}
 	if safeIssueURL != "" {
 		body += fmt.Sprintf(
 			`<p style="margin: 24px 0;">
@@ -496,7 +512,18 @@ func (s *EmailService) SendTaskStatusEmail(msg TaskStatusEmail) error {
 	}
 	body += `<p style="color: #666; font-size: 14px;">You are receiving this because you are subscribed to this issue.</p></div>`
 
-	return s.deliver(msg.To, subject, body, "task status")
+	return body
+}
+
+func truncateEmailText(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes]) + "\n\n[truncated]"
 }
 
 // buildInvitationParams assembles the email request for an invitation.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/events"
@@ -74,6 +75,35 @@ func newNotificationBus(t *testing.T, queries *db.Queries) *events.Bus {
 	registerSubscriberListeners(bus, queries)
 	registerNotificationListeners(bus, queries)
 	return bus
+}
+
+func TestTaskResultTextFromTaskResult_UnescapesOutput(t *testing.T) {
+	raw, err := json.Marshal(protocol.TaskCompletedPayload{
+		TaskID: "00000000-0000-0000-0000-bbbbbbbbbbbb",
+		Output: "Line 1\\nLine 2",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	got := taskResultTextFromTaskResult(raw)
+	if got != "Line 1\nLine 2" {
+		t.Fatalf("taskResultTextFromTaskResult() = %q", got)
+	}
+}
+
+func TestTaskResultTextFromTaskResult_FallbackResultField(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"result": "Finished customer import",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	got := taskResultTextFromTaskResult(raw)
+	if got != "Finished customer import" {
+		t.Fatalf("taskResultTextFromTaskResult() = %q", got)
+	}
 }
 
 // TestNotification_IssueCreated_AssigneeNotified verifies that when an issue is
@@ -538,8 +568,8 @@ func TestNotification_AssigneeChanged(t *testing.T) {
 				AssigneeType: &newAssigneeType,
 				AssigneeID:   &newAssigneeID,
 			},
-			"assignee_changed":  true,
-			"status_changed":    false,
+			"assignee_changed":   true,
+			"status_changed":     false,
 			"prev_assignee_type": &oldAssigneeType,
 			"prev_assignee_id":   &oldAssigneeID,
 		},

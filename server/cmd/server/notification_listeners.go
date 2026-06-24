@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
+	"github.com/multica-ai/multica/server/pkg/redact"
 )
 
 // mention represents a parsed @mention from markdown content (local alias).
@@ -106,6 +107,45 @@ func taskFailureText(payload map[string]any) string {
 	return ""
 }
 
+func taskResultText(payload map[string]any) string {
+	for _, key := range []string{"output", "result"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func taskResultTextFromTaskResult(raw []byte) string {
+	var payload protocol.TaskCompletedPayload
+	if err := json.Unmarshal(raw, &payload); err == nil && strings.TrimSpace(payload.Output) != "" {
+		return strings.TrimSpace(util.UnescapeBackslashEscapes(payload.Output))
+	}
+
+	var fallback map[string]any
+	if err := json.Unmarshal(raw, &fallback); err != nil {
+		return ""
+	}
+	return taskResultText(fallback)
+}
+
+func completedTaskResultText(ctx context.Context, queries *db.Queries, payload map[string]any) string {
+	if result := taskResultText(payload); result != "" {
+		return redact.Text(result)
+	}
+
+	taskID, _ := payload["task_id"].(string)
+	if taskID == "" {
+		return ""
+	}
+	task, err := queries.GetAgentTask(ctx, parseUUID(taskID))
+	if err != nil {
+		slog.Warn("task:completed email: failed to get task result", "task_id", taskID, "error", err)
+		return ""
+	}
+	return redact.Text(taskResultTextFromTaskResult(task.Result))
+}
+
 func sendTaskStatusEmails(
 	ctx context.Context,
 	queries *db.Queries,
@@ -116,6 +156,7 @@ func sendTaskStatusEmails(
 	notifType string,
 	status string,
 	errorText string,
+	resultText string,
 ) {
 	if emailSvc == nil {
 		return
@@ -156,6 +197,7 @@ func sendTaskStatusEmails(
 			IssueURL:      issueURL,
 			Status:        status,
 			Error:         errorText,
+			Result:        resultText,
 		}); err != nil {
 			slog.Error("task status email: send failed",
 				"to", row.Email, "issue_id", util.UUIDToString(issue.ID), "type", notifType, "error", err)
@@ -1014,7 +1056,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries, emailSe
 		}
 
 		sendTaskStatusEmails(ctx, queries, emailSvc, e, workspace, issue,
-			"task_completed", taskStatusFromEventType(e.Type), "")
+			"task_completed", taskStatusFromEventType(e.Type), "", completedTaskResultText(ctx, queries, payload))
 	})
 
 	// task:failed — notify all subscribers except the agent
@@ -1040,7 +1082,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries, emailSe
 				"workspace_id", e.WorkspaceID, "issue_id", issueID, "error", err)
 		} else {
 			sendTaskStatusEmails(ctx, queries, emailSvc, e, workspace, issue,
-				"task_failed", taskStatusFromEventType(e.Type), taskFailureText(payload))
+				"task_failed", taskStatusFromEventType(e.Type), taskFailureText(payload), "")
 		}
 
 		exclude := map[string]bool{}

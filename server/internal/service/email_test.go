@@ -420,6 +420,47 @@ func TestBuildInvitationParams_ToAndFromPassedThrough(t *testing.T) {
 	}
 }
 
+func TestBuildTaskStatusEmailHTML_IncludesEscapedRedactedResult(t *testing.T) {
+	body := buildTaskStatusEmailHTML(TaskStatusEmail{
+		WorkspaceName: "Acme",
+		IssueTitle:    "Customer import",
+		IssueURL:      "https://app.multica.ai/acme/issues/123",
+		Status:        "completed",
+		Result:        "Imported <b>42</b> records\nAPI_KEY=super-secret",
+	})
+
+	for _, want := range []string{
+		"Result",
+		"Imported &lt;b&gt;42&lt;/b&gt; records",
+		"[REDACTED CREDENTIAL]",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q\nbody: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{
+		"<b>42</b>",
+		"super-secret",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("body contains raw sensitive result %q\nbody: %s", forbidden, body)
+		}
+	}
+}
+
+func TestBuildTaskStatusEmailHTML_TruncatesLongResult(t *testing.T) {
+	body := buildTaskStatusEmailHTML(TaskStatusEmail{
+		WorkspaceName: "Acme",
+		IssueTitle:    "Long run",
+		Status:        "completed",
+		Result:        strings.Repeat("x", maxTaskResultEmailRunes+10),
+	})
+
+	if !strings.Contains(body, "[truncated]") {
+		t.Fatalf("expected truncation marker in body")
+	}
+}
+
 // --- loginAuth.Start security tests ---
 
 func TestLoginAuth_Start_RefusesUnencryptedRemote(t *testing.T) {
