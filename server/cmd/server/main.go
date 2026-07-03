@@ -17,6 +17,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/integrations/emailpoller"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -373,6 +374,11 @@ func main() {
 	go heartbeatScheduler.Run(sweepCtx)
 	go runAutopilotFailureMonitor(autopilotCtx, queries, bus, envFailureMonitorConfig())
 	go runDBStatsLogger(sweepCtx, pool)
+	if emailPollCfg, err := emailpoller.ConfigFromEnv(); err != nil {
+		slog.Warn("email poller disabled due to invalid configuration", "error", err)
+	} else if emailPollCfg.Enabled {
+		go emailpoller.Run(sweepCtx, queries, h.IssueService, emailPollCfg)
+	}
 
 	// Lark inbound supervisor: holds the §4.4 WS lease per installation
 	// and runs the EventConnector for each. Nil when the Lark master
