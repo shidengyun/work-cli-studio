@@ -306,3 +306,33 @@ func TestGetConfigExposesVerificationCodeViewerFlag(t *testing.T) {
 		t.Fatalf("verification_code_viewer_enabled: want true, got false")
 	}
 }
+
+func TestGetConfigExposesFrontendFeatureFlags(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	w := httptest.NewRecorder()
+	h.GetConfig(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetConfig default flags: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var cfg AppConfig
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode default config: %v", err)
+	}
+	if cfg.FeatureFlags["composio_mcp_apps"] {
+		t.Fatalf("composio_mcp_apps: want false by default, got true")
+	}
+
+	withComposioMCPAppsFlag(t, h, true)
+	w = httptest.NewRecorder()
+	h.GetConfig(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetConfig enabled flags: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode enabled config: %v", err)
+	}
+	if !cfg.FeatureFlags["composio_mcp_apps"] {
+		t.Fatalf("composio_mcp_apps: want true with flag enabled, got false")
+	}
+}

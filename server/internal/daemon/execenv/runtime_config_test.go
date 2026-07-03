@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/runtimeapps"
 )
 
 // Sub-issue Creation section — after MUL-2538 the platform posts the
@@ -369,6 +371,52 @@ func TestChatOutputDoesNotRequireIssueComment(t *testing.T) {
 	}
 }
 
+// The Output section for issue tasks must forbid mid-run progress
+// comments and require the single final result comment. Guards the
+// MUL-3605 regression where a review agent surfaced its progress
+// narration as the result instead of posting a conclusion. (The
+// pre-existing "Final results MUST be delivered … invisible without it"
+// and "state the outcome, not the process" lines already carry the
+// mandatory-comment and no-process-dump halves.) Chat / quick-create /
+// autopilot kinds keep their own delivery channels and must NOT inherit
+// this rule. Runs both the legacy and slim paths.
+func TestOutputForbidsMidRunProgressComments(t *testing.T) {
+	wantPhrases := []string{
+		"Post exactly ONE comment per run",
+		"Do NOT post progress updates",
+	}
+	issueCtxs := map[string]TaskContextForEnv{
+		"assignment": {IssueID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+		"comment":    {IssueID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", TriggerCommentID: "tc-1"},
+	}
+
+	run := func(t *testing.T, label string) {
+		for name, ctx := range issueCtxs {
+			out := buildMetaSkillContent("claude", ctx)
+			for _, want := range wantPhrases {
+				if !strings.Contains(out, want) {
+					t.Errorf("%s/%s brief missing output rule %q\n---\n%s", label, name, want, out)
+				}
+			}
+		}
+		// Chat keeps its own delivery channel; it must not inherit the
+		// issue-task "post a final comment" rules.
+		chat := buildMetaSkillContent("claude", TaskContextForEnv{ChatSessionID: "chat-1"})
+		for _, banned := range wantPhrases {
+			if strings.Contains(chat, banned) {
+				t.Errorf("%s chat brief must not inherit issue output rule %q", label, banned)
+			}
+		}
+	}
+
+	// Not parallel: the slim subtest toggles a process-wide feature flag.
+	t.Run("legacy", func(t *testing.T) { run(t, "legacy") })
+	t.Run("slim", func(t *testing.T) {
+		withSlimBrief(t)
+		run(t, "slim")
+	})
+}
+
 // The sub-issue creation rule must reach top-level parents that have no
 // `parent_issue_id` of their own — that is where the `todo` vs `backlog`
 // decision matters most. The section must not gate on this issue being
@@ -501,6 +549,52 @@ func TestWorkspaceContextHeadingSkippedWhenEmpty(t *testing.T) {
 				t.Errorf("[%s] empty workspace context must NOT emit the heading", tc.name)
 			}
 		})
+	}
+}
+
+func TestConnectedAppsRenderedAcrossBriefModes(t *testing.T) {
+	ctx := TaskContextForEnv{
+		IssueID:          "11111111-2222-3333-4444-555555555555",
+		WorkspaceContext: "Prefer source-of-truth systems.",
+		ConnectedApps: []runtimeapps.ConnectedApp{{
+			Provider:    "composio",
+			ServerName:  "composio",
+			ToolkitSlug: "notion",
+			ToolkitName: "Notion",
+		}},
+	}
+
+	run := func(t *testing.T, label string) {
+		out := buildMetaSkillContent("claude", ctx)
+		for _, want := range []string{
+			"## Connected Apps",
+			"- Notion (`notion`) via MCP server `composio`",
+			"Use the listed MCP server when the task asks to read or act in one of these apps.",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s brief missing connected app text %q\n---\n%s", label, want, out)
+			}
+		}
+		wsIdx := strings.Index(out, "## Workspace Context")
+		appIdx := strings.Index(out, "## Connected Apps")
+		cmdIdx := strings.Index(out, "## Available Commands")
+		if wsIdx == -1 || appIdx == -1 || cmdIdx == -1 || !(wsIdx < appIdx && appIdx < cmdIdx) {
+			t.Fatalf("%s connected apps should sit between workspace context and available commands (ws=%d app=%d cmd=%d)", label, wsIdx, appIdx, cmdIdx)
+		}
+	}
+
+	t.Run("legacy", func(t *testing.T) { run(t, "legacy") })
+	t.Run("slim", func(t *testing.T) {
+		withSlimBrief(t)
+		run(t, "slim")
+	})
+}
+
+func TestConnectedAppsHeadingSkippedWhenEmpty(t *testing.T) {
+	t.Parallel()
+	out := buildMetaSkillContent("claude", TaskContextForEnv{IssueID: "11111111-2222-3333-4444-555555555555"})
+	if strings.Contains(out, "## Connected Apps") {
+		t.Fatalf("empty connected apps must not emit the heading")
 	}
 }
 

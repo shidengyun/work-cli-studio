@@ -1,6 +1,10 @@
 package daemon
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/multica-ai/multica/server/internal/runtimeapps"
+)
 
 // AgentEntry describes a single available agent CLI.
 type AgentEntry struct {
@@ -38,6 +42,10 @@ type ProjectResourceData struct {
 	Label        string          `json:"label,omitempty"`
 }
 
+// ConnectedAppData keeps the claim-response field local to daemon types while
+// sharing the canonical JSON shape with the runtime app metadata package.
+type ConnectedAppData = runtimeapps.ConnectedApp
+
 // Task represents a claimed task from the server.
 // Agent data (name, skills) is populated by the claim endpoint.
 type Task struct {
@@ -53,6 +61,7 @@ type Task struct {
 	WorkspaceContext         string                `json:"workspace_context,omitempty"`
 	ThreadName               string                `json:"thread_name,omitempty"` // semantic title for provider-native session/thread history
 	Agent                    *AgentData            `json:"agent,omitempty"`
+	ConnectedApps            []ConnectedAppData    `json:"connected_apps,omitempty"` // per-run app capabilities mounted through runtime MCP overlays
 	Repos                    []RepoData            `json:"repos,omitempty"`
 	ProjectID                string                `json:"project_id,omitempty"`                  // issue's project, when present
 	ProjectTitle             string                `json:"project_title,omitempty"`               // human-readable project title for context injection
@@ -68,6 +77,8 @@ type Task struct {
 	NewCommentCount          int                   `json:"new_comment_count,omitempty"`           // issue-wide comments since this agent's last run (excludes its own and the injected trigger); 0/omitted for old daemons or cold start
 	NewCommentsSince         string                `json:"new_comments_since,omitempty"`          // RFC3339 anchor (last run's started_at) the count is measured from; empty on cold start
 	ChatSessionID            string                `json:"chat_session_id,omitempty"`             // non-empty for chat tasks
+	ChatChannelType          string                `json:"chat_channel_type,omitempty"`           // "slack" when the chat session is backed by an IM channel; empty for a web-only chat. Drives the channel-awareness block in the prompt
+	ChatInThread             bool                  `json:"chat_in_thread,omitempty"`              // true when the latest @mention was a thread reply; selects which read command the prompt tells the agent to start with
 	ChatMessage              string                `json:"chat_message,omitempty"`                // user message content for chat tasks
 	ChatMessageAttachments   []ChatAttachmentMeta  `json:"chat_message_attachments,omitempty"`    // attachments linked to the chat message; agent uses these to `multica attachment download <id>`
 	AutopilotRunID           string                `json:"autopilot_run_id,omitempty"`            // non-empty for autopilot run_only tasks

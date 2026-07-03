@@ -175,6 +175,12 @@ type Daemon struct {
 	wsHBMu      sync.RWMutex         // guards wsHBLastAck
 	wsHBLastAck map[string]time.Time // runtime_id -> last successful WS heartbeat ack timestamp
 
+	// reconcile fans out a "re-check server state now" signal to subscribers
+	// (watchTaskCancellation, workspaceSyncLoop) so the WS connect/reconnect
+	// path can shrink the 5s / 30s reconciliation gap to sub-second. See
+	// reconcile.go and runTaskWakeupConnection.
+	reconcile *reconcileBroadcaster
+
 	// runtimeGoneMu guards runtimeGoneInflight, reregisterNextAttempt, and
 	// reregisterLastCompletedAt. The state lets heartbeat / poller / WS-ack
 	// handlers converge on a single recovery path when they each detect that a
@@ -264,6 +270,7 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 		reregisterNextAttempt:     make(map[string]time.Time),
 		reregisterLastCompletedAt: make(map[string]time.Time),
 		cancelPollInterval:        5 * time.Second,
+		reconcile:                 newReconcileBroadcaster(),
 	}
 	d.runner = taskRunnerFunc(d.runTask)
 	d.runUpdateFn = d.runUpdate
@@ -923,7 +930,7 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 		}
 		d.setAgentVersion(name, version)
 		d.logger.Debug("agent version detected", "name", name, "version", version, "path", entry.Path)
-		displayName := strings.ToUpper(name[:1]) + name[1:]
+		displayName := providerDisplayName(name)
 		if d.cfg.DeviceName != "" {
 			displayName = fmt.Sprintf("%s (%s)", displayName, d.cfg.DeviceName)
 		}
@@ -1684,19 +1691,35 @@ func (d *Daemon) tryRenewToken(ctx context.Context) {
 }
 
 // workspaceSyncLoop periodically fetches the user's workspaces from the API
-// and registers runtimes for any new ones.
+// and registers runtimes for any new ones. A WS connect/reconnect broadcast
+// triggers an immediate sync so runtime/repo changes the server applied during
+// the WS gap are picked up sub-second instead of after the next 30s tick.
 func (d *Daemon) workspaceSyncLoop(ctx context.Context) {
 	ticker := time.NewTicker(DefaultWorkspaceSyncInterval)
 	defer ticker.Stop()
+
+	var reconcileCh <-chan struct{}
+	if d.reconcile != nil {
+		reconcileCh = d.reconcile.notify()
+	}
+
+	sync := func() {
+		if err := d.syncWorkspacesFromAPI(ctx); err != nil {
+			d.logger.Debug("workspace sync failed", "error", err)
+		}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := d.syncWorkspacesFromAPI(ctx); err != nil {
-				d.logger.Debug("workspace sync failed", "error", err)
+		case <-reconcileCh:
+			if d.reconcile != nil {
+				reconcileCh = d.reconcile.notify()
 			}
+			sync()
+		case <-ticker.C:
+			sync()
 		}
 	}
 }
@@ -1905,7 +1928,19 @@ func (d *Daemon) runRuntimeHeartbeat(ctx context.Context, rid string) {
 		}
 	}
 
-	d.runHeartbeatTick(ctx, rid)
+	consecutiveTransientFailures := 0
+	tick := func() {
+		if d.runHeartbeatTick(ctx, rid) {
+			consecutiveTransientFailures++
+			if consecutiveTransientFailures == 2 {
+				d.client.CloseIdleConnections()
+			}
+			return
+		}
+		consecutiveTransientFailures = 0
+	}
+
+	tick()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1914,12 +1949,14 @@ func (d *Daemon) runRuntimeHeartbeat(ctx context.Context, rid string) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			d.runHeartbeatTick(ctx, rid)
+			tick()
 		}
 	}
 }
 
-func (d *Daemon) runHeartbeatTick(ctx context.Context, rid string) {
+// runHeartbeatTick returns true when the HTTP heartbeat hit a transient
+// failure that should count toward stale idle-connection cleanup.
+func (d *Daemon) runHeartbeatTick(ctx context.Context, rid string) bool {
 	// Skip HTTP heartbeat for runtimes that successfully acked a recent
 	// WebSocket heartbeat. The WS path keeps last_seen_at fresh and delivers
 	// actions, so the HTTP write would be a duplicate DB update. If the WS
@@ -1928,7 +1965,7 @@ func (d *Daemon) runHeartbeatTick(ctx context.Context, rid string) {
 	// relies on.
 	if d.wsHeartbeatRecentlyAcked(rid) {
 		d.logger.Debug("heartbeat: skipping HTTP tick, WS recently acked", "runtime_id", rid)
-		return
+		return false
 	}
 	d.logger.Debug("heartbeat: HTTP tick", "runtime_id", rid)
 	resp, err := d.client.SendHeartbeat(ctx, rid)
@@ -1941,20 +1978,21 @@ func (d *Daemon) runHeartbeatTick(ctx context.Context, rid string) {
 				// the daemon root context so notifyRuntimeSetChanged
 				// tearing down this heartbeat goroutine cannot abort it.
 				go d.handleRuntimeGone(rid)
-				return
+				return false
 			}
 			d.logger.Warn("heartbeat failed", "runtime_id", rid, "error", err)
 		}
-		return
+		return ctx.Err() == nil && isTransientError(err)
 	}
 	if resp != nil && resp.RuntimeGone {
 		// The WS path returns a successful ack with RuntimeGone=true for the
 		// same scenario; treat it the same way here in case HTTP starts
 		// surfacing this signal too.
 		go d.handleRuntimeGone(rid)
-		return
+		return false
 	}
 	d.handleHeartbeatActions(ctx, rid, resp)
+	return false
 }
 
 // handleHeartbeatActions dispatches the pending-action set returned by either
@@ -2738,25 +2776,48 @@ func shouldInterruptAgent(status string, err error) bool {
 // so callers should pass the runCtx that was set up around the agent run.
 func (d *Daemon) watchTaskCancellation(ctx context.Context, taskID string, pollInterval time.Duration, taskLog *slog.Logger) <-chan struct{} {
 	cancelled := make(chan struct{})
+	// Subscribe to the reconcile broadcaster before launching the inner
+	// goroutine. A WS reconnect that fires between the goroutine starting
+	// and its first notify() call would otherwise be dropped; the ticker
+	// still bounds the worst case, but the whole point of the broadcast is
+	// to avoid waiting on that ticker.
+	var reconcileCh <-chan struct{}
+	if d.reconcile != nil {
+		reconcileCh = d.reconcile.notify()
+	}
 	go func() {
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
+		check := func() bool {
+			status, err := d.client.GetTaskStatus(ctx, taskID)
+			if !shouldInterruptAgent(status, err) {
+				return false
+			}
+			if err != nil {
+				taskLog.Info("task gone server-side, interrupting agent", "error", err)
+			} else {
+				taskLog.Info("task reached terminal state server-side, interrupting agent", "status", status)
+			}
+			close(cancelled)
+			return true
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-reconcileCh:
+				// Refresh the subscription before issuing the request so a
+				// second broadcast that overlaps GetTaskStatus is not lost.
+				if d.reconcile != nil {
+					reconcileCh = d.reconcile.notify()
+				}
+				if check() {
+					return
+				}
 			case <-ticker.C:
-				status, err := d.client.GetTaskStatus(ctx, taskID)
-				if !shouldInterruptAgent(status, err) {
-					continue
+				if check() {
+					return
 				}
-				if err != nil {
-					taskLog.Info("task gone server-side, interrupting agent", "error", err)
-				} else {
-					taskLog.Info("task reached terminal state server-side, interrupting agent", "status", status)
-				}
-				close(cancelled)
-				return
 			}
 		}
 	}()
@@ -3157,9 +3218,27 @@ func gcMetaForTask(task Task) (execenv.GCMeta, bool) {
 	return meta, true
 }
 
+// runtimeDisplayNameOverrides maps a provider key to the human-facing runtime
+// name when simple title-casing would read awkwardly. Providers not listed
+// here fall back to capitalizing the key (claude → "Claude", codex → "Codex").
+var runtimeDisplayNameOverrides = map[string]string{
+	"traecli": "Trae",
+}
+
+// providerDisplayName returns the human-facing runtime name for a provider key.
+func providerDisplayName(name string) string {
+	if name == "" {
+		return name
+	}
+	if friendly, ok := runtimeDisplayNameOverrides[name]; ok {
+		return friendly
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
+}
+
 func providerNeedsInlineSystemPrompt(provider string) bool {
 	switch provider {
-	case "openclaw", "kiro", "kimi":
+	case "openclaw", "kiro", "kimi", "traecli":
 		return true
 	default:
 		return false
@@ -3214,23 +3293,20 @@ func (d *Daemon) ensureTaskSkillBundles(ctx context.Context, task *Task) error {
 		}
 	}
 
-	if len(misses) > 0 {
-		bundles, err := d.client.ResolveSkillBundles(ctx, task.RuntimeID, task.ID, misses)
+	// Resolve each missing bundle in its own request, caching it the moment it
+	// arrives. The download is the slow part on jittery links, so fetching the
+	// whole set in one atomic body read meant a single timeout discarded all
+	// progress and the cache never converged — every dispatch re-downloaded
+	// everything and timed out again. Per-skill, each download fits its own
+	// size-scaled deadline and is persisted independently, so even a dispatch
+	// that ultimately fails leaves the skills it did fetch cached for the next
+	// one. (GitHub #4505 / MUL-3650)
+	for _, ref := range misses {
+		bundle, err := d.resolveSkillBundle(ctx, task, ref)
 		if err != nil {
 			return fmt.Errorf("resolve skill bundles: %w", err)
 		}
-		for _, bundle := range bundles {
-			ref := skillRefFromBundle(bundle)
-			if !validateSkillBundle(ref, bundle) {
-				return fmt.Errorf("resolve skill bundle returned invalid bundle: skill_id=%s source=%s hash=%s", bundle.ID, bundle.Source, bundle.Hash)
-			}
-			if err := d.skillCache.WithRefLock(task.WorkspaceID, ref, func() error {
-				return d.skillCache.Store(task.WorkspaceID, bundle)
-			}); err != nil {
-				return fmt.Errorf("store skill bundle cache: %w", err)
-			}
-			resolved[skillRefKey(bundle.Source, bundle.ID)] = bundle
-		}
+		resolved[skillRefKey(bundle.Source, bundle.ID)] = bundle
 	}
 
 	skills := make([]SkillData, 0, len(task.Agent.SkillRefs))
@@ -3243,6 +3319,71 @@ func (d *Daemon) ensureTaskSkillBundles(ctx context.Context, task *Task) error {
 	}
 	task.Agent.Skills = skills
 	return nil
+}
+
+// resolveSkillBundle downloads one skill bundle and writes it to the on-disk
+// cache before returning. The request runs under its own deadline, scaled to
+// the bundle's declared size rather than the daemon's fixed 30s control-plane
+// timeout, so a large bundle on a slow link is given room to finish instead of
+// being cut off mid-body. Caching on success is what lets the resolve converge
+// across dispatches. (GitHub #4505 / MUL-3650)
+func (d *Daemon) resolveSkillBundle(ctx context.Context, task *Task, ref SkillRefData) (SkillData, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, skillBundleResolveTimeout(ref.SizeBytes))
+	defer cancel()
+
+	bundle, err := d.client.ResolveSkillBundle(reqCtx, task.RuntimeID, task.ID, ref)
+	if err != nil {
+		return SkillData{}, err
+	}
+	// The resolve endpoint serves the agent's *current* bundle and hash, which
+	// may differ from the claim-time ref when the skill was edited between
+	// claim and prepare (see ResolveTaskSkillBundles). So confirm only that the
+	// server returned the skill we asked for (source/id), then validate the
+	// bundle for self-consistency against a ref derived from itself — pinning
+	// it to the possibly-stale requested hash would reject a legitimate update.
+	if bundle.Source != ref.Source || bundle.ID != ref.ID {
+		return SkillData{}, fmt.Errorf("resolve skill bundle returned wrong skill: requested source=%s id=%s, got source=%s id=%s", ref.Source, ref.ID, bundle.Source, bundle.ID)
+	}
+	bundleRef := skillRefFromBundle(bundle)
+	if !validateSkillBundle(bundleRef, bundle) {
+		return SkillData{}, fmt.Errorf("resolve skill bundle returned invalid bundle: skill_id=%s source=%s hash=%s", bundle.ID, bundle.Source, bundle.Hash)
+	}
+	if err := d.skillCache.WithRefLock(task.WorkspaceID, bundleRef, func() error {
+		return d.skillCache.Store(task.WorkspaceID, bundle)
+	}); err != nil {
+		return SkillData{}, fmt.Errorf("store skill bundle cache: %w", err)
+	}
+	return bundle, nil
+}
+
+const (
+	// skillBundleResolveMinTimeout floors the per-skill resolve deadline so a
+	// tiny bundle still tolerates connection setup and round-trip latency.
+	skillBundleResolveMinTimeout = 30 * time.Second
+	// skillBundleResolveMaxTimeout caps it so a wedged download cannot pin a
+	// task in prepare indefinitely.
+	skillBundleResolveMaxTimeout = 5 * time.Minute
+	// skillBundleResolveMinThroughput is the pessimistic floor throughput
+	// (bytes/sec) used to scale the deadline to bundle size — deliberately low
+	// to cover slow, jittery links rather than ideal bandwidth.
+	skillBundleResolveMinThroughput = 50 * 1024
+)
+
+// skillBundleResolveTimeout returns the deadline budget for downloading a
+// bundle of the given size: at least skillBundleResolveMinTimeout, scaled up at
+// skillBundleResolveMinThroughput, and capped at skillBundleResolveMaxTimeout.
+func skillBundleResolveTimeout(sizeBytes int64) time.Duration {
+	if sizeBytes <= 0 {
+		return skillBundleResolveMinTimeout
+	}
+	scaled := time.Duration(sizeBytes/skillBundleResolveMinThroughput) * time.Second
+	if scaled < skillBundleResolveMinTimeout {
+		return skillBundleResolveMinTimeout
+	}
+	if scaled > skillBundleResolveMaxTimeout {
+		return skillBundleResolveMaxTimeout
+	}
+	return scaled
 }
 
 func (d *Daemon) startTaskPrepareLeaseExtender(ctx context.Context, task Task, taskLog *slog.Logger) func() {
@@ -3402,6 +3543,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		InitiatorName:                    task.InitiatorName,
 		InitiatorEmail:                   task.InitiatorEmail,
 		WorkspaceContext:                 task.WorkspaceContext,
+		ConnectedApps:                    task.ConnectedApps,
 	}
 
 	// Mark candidate env roots as active before any env work so the GC loop
