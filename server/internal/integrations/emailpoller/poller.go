@@ -22,6 +22,7 @@ import (
 
 type Queries interface {
 	GetMemberByUserAndWorkspace(ctx context.Context, arg db.GetMemberByUserAndWorkspaceParams) (db.Member, error)
+	ListAgents(ctx context.Context, workspaceID pgtype.UUID) ([]db.Agent, error)
 }
 
 type IssueCreator interface {
@@ -200,6 +201,10 @@ func processMessage(ctx context.Context, queries Queries, issueCreator IssueCrea
 		}
 		return false, err
 	}
+	assigneeType, assigneeID, err := resolveAssignee(ctx, queries, cfg)
+	if err != nil {
+		return false, err
+	}
 	description := buildIssueDescription(cmd.Description, parsed)
 	res, err := issueCreator.Create(ctx, service.IssueCreateParams{
 		WorkspaceID:    cfg.WorkspaceID,
@@ -207,8 +212,8 @@ func processMessage(ctx context.Context, queries Queries, issueCreator IssueCrea
 		Description:    pgtype.Text{String: description, Valid: description != ""},
 		Status:         "in_progress",
 		Priority:       "none",
-		AssigneeType:   cfg.AssigneeType,
-		AssigneeID:     cfg.AssigneeID,
+		AssigneeType:   assigneeType,
+		AssigneeID:     assigneeID,
 		CreatorType:    "member",
 		CreatorID:      member.UserID,
 		AllowDuplicate: false,
@@ -227,6 +232,29 @@ func processMessage(ctx context.Context, queries Queries, issueCreator IssueCrea
 	}
 	slog.Info("email poller: issue created", "issue_id", util.UUIDToString(res.Issue.ID), "title", cmd.Title, "from", parsed.From)
 	return true, nil
+}
+
+func resolveAssignee(ctx context.Context, queries Queries, cfg Config) (pgtype.Text, pgtype.UUID, error) {
+	if cfg.AssigneeType.Valid && cfg.AssigneeID.Valid {
+		return cfg.AssigneeType, cfg.AssigneeID, nil
+	}
+	if cfg.AssigneeType.Valid != cfg.AssigneeID.Valid {
+		return pgtype.Text{}, pgtype.UUID{}, errors.New("configured default assignee type and id must be set together")
+	}
+
+	agents, err := queries.ListAgents(ctx, cfg.WorkspaceID)
+	if err != nil {
+		return pgtype.Text{}, pgtype.UUID{}, fmt.Errorf("list workspace agents: %w", err)
+	}
+	for _, agent := range agents {
+		if agent.RuntimeID.Valid {
+			return pgtype.Text{String: "agent", Valid: true}, agent.ID, nil
+		}
+	}
+	if len(agents) == 0 {
+		return pgtype.Text{}, pgtype.UUID{}, errors.New("workspace has no active agents")
+	}
+	return pgtype.Text{}, pgtype.UUID{}, errors.New("workspace has no active agents with a runtime")
 }
 
 func newMailClient(ctx context.Context, cfg Config) (MailClient, error) {

@@ -11,12 +11,9 @@
 @source "../../../packages/core/**/*.{ts,tsx}";
 @source "../../../packages/views/**/*.{ts,tsx}";
 
-/* Font stack. `--font-inter` is the next/font Inter family (+ its synthetic
-   size-adjusted fallback), set on <html> by inter.variable in app/layout.tsx.
-   We compose `--font-sans` here in static CSS — rather than baking the CJK tail
-   into next/font's `fallback` — so it can be overridden per `<html lang>` and
-   stays CSP-safe (no inline <style>). Tailwind's `font-sans` utility resolves
-   `var(--font-sans)` (see packages/ui/styles/tokens.css `@theme inline`).
+/* Font stack. Production builds must not depend on Google Fonts being reachable
+   from the deployment host, so the app uses local system stacks for the CSS
+   variables that Tailwind resolves through packages/ui/styles/tokens.css.
 
    Default (en / zh / ko): Latin chars render with Inter; CJK chars fall through
    to the platform Chinese fonts, then Korean. Chinese MUST stay before Korean so
@@ -24,6 +21,12 @@
    block, so ko users still get Korean fonts for Hangul). Kept in sync with
    apps/desktop/src/renderer/src/globals.css. */
 :root {
+  --font-inter: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
+  --font-serif: ui-serif, "Iowan Old Style", "Apple Garamond", Baskerville,
+    "Times New Roman", serif;
+  --font-serif-zh: "Noto Serif SC", "Songti SC", SimSun, serif;
   --font-sans: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI",
     "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Apple SD Gothic Neo",
     "Malgun Gothic", "Noto Sans CJK KR", sans-serif;

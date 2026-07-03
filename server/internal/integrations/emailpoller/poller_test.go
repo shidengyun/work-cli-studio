@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -12,6 +13,7 @@ import (
 
 type fakeQueries struct {
 	member db.Member
+	agents []db.Agent
 }
 
 func TestConfigFromEnvReadsTLSLegacy(t *testing.T) {
@@ -53,6 +55,17 @@ func (q fakeQueries) GetMemberByUserAndWorkspace(context.Context, db.GetMemberBy
 	return q.member, nil
 }
 
+func (q fakeQueries) ListAgents(context.Context, pgtype.UUID) ([]db.Agent, error) {
+	return q.agents, nil
+}
+
+func fakeRuntimeAgent() db.Agent {
+	return db.Agent{
+		ID:        util.MustParseUUID("44444444-4444-4444-4444-444444444444"),
+		RuntimeID: util.MustParseUUID("55555555-5555-5555-5555-555555555555"),
+	}
+}
+
 type fakeIssueCreator struct {
 	calls  int
 	params service.IssueCreateParams
@@ -91,7 +104,10 @@ func TestProcessMessageCreatesIssueForPrefixedSubject(t *testing.T) {
 		"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
 		"查一下周日南京的天气\r\n")
 
-	handled, err := processMessage(context.Background(), fakeQueries{member: db.Member{UserID: userID}}, creator, Config{
+	handled, err := processMessage(context.Background(), fakeQueries{
+		member: db.Member{UserID: userID},
+		agents: []db.Agent{fakeRuntimeAgent()},
+	}, creator, Config{
 		WorkspaceID:   workspaceID,
 		CreatorUserID: userID,
 		AllowedTo:     "manda@wacai.com",
@@ -116,6 +132,42 @@ func TestProcessMessageCreatesIssueForPrefixedSubject(t *testing.T) {
 	}
 }
 
+func TestProcessMessageAssignsFirstRuntimeAgentByDefault(t *testing.T) {
+	userID := util.MustParseUUID("11111111-1111-1111-1111-111111111111")
+	workspaceID := util.MustParseUUID("22222222-2222-2222-2222-222222222222")
+	agentWithoutRuntimeID := util.MustParseUUID("33333333-3333-3333-3333-333333333333")
+	agentWithRuntimeID := util.MustParseUUID("44444444-4444-4444-4444-444444444444")
+	runtimeID := util.MustParseUUID("55555555-5555-5555-5555-555555555555")
+	creator := &fakeIssueCreator{}
+	raw := []byte("From: outsider@example.com\r\n" +
+		"To: manda@wacai.com\r\n" +
+		"Subject: 创建任务：默认智能体\r\n\r\nbody")
+
+	handled, err := processMessage(context.Background(), fakeQueries{
+		member: db.Member{UserID: userID},
+		agents: []db.Agent{
+			{ID: agentWithoutRuntimeID},
+			{ID: agentWithRuntimeID, RuntimeID: runtimeID},
+		},
+	}, creator, Config{
+		WorkspaceID:   workspaceID,
+		CreatorUserID: userID,
+		AllowedTo:     "manda@wacai.com",
+	}, Message{UID: 7, Raw: raw})
+	if err != nil {
+		t.Fatalf("processMessage: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if creator.params.AssigneeType.String != "agent" || !creator.params.AssigneeType.Valid {
+		t.Fatalf("assignee type = %#v", creator.params.AssigneeType)
+	}
+	if util.UUIDToString(creator.params.AssigneeID) != util.UUIDToString(agentWithRuntimeID) {
+		t.Fatalf("assignee id = %s, want %s", util.UUIDToString(creator.params.AssigneeID), util.UUIDToString(agentWithRuntimeID))
+	}
+}
+
 func TestPollOnceMarksOnlyHandledMessagesSeen(t *testing.T) {
 	userID := util.MustParseUUID("11111111-1111-1111-1111-111111111111")
 	workspaceID := util.MustParseUUID("22222222-2222-2222-2222-222222222222")
@@ -124,7 +176,10 @@ func TestPollOnceMarksOnlyHandledMessagesSeen(t *testing.T) {
 		{UID: 2, Raw: []byte("From: a@example.com\r\nTo: manda@wacai.com\r\nSubject: hello\r\n\r\nbody")},
 	}}
 	creator := &fakeIssueCreator{}
-	pollOnce(context.Background(), fakeQueries{member: db.Member{UserID: userID}}, creator, Config{
+	pollOnce(context.Background(), fakeQueries{
+		member: db.Member{UserID: userID},
+		agents: []db.Agent{fakeRuntimeAgent()},
+	}, creator, Config{
 		WorkspaceID:   workspaceID,
 		CreatorUserID: userID,
 		AllowedTo:     "manda@wacai.com",
