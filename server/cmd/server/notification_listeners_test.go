@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -105,65 +103,6 @@ func TestTaskResultTextFromTaskResult_FallbackResultField(t *testing.T) {
 	got := taskResultTextFromTaskResult(raw)
 	if got != "Finished customer import" {
 		t.Fatalf("taskResultTextFromTaskResult() = %q", got)
-	}
-}
-
-func TestCompletedTaskTranscriptText_IncludesUsefulMessages(t *testing.T) {
-	ctx := context.Background()
-	queries := db.New(testPool)
-	var agentID, runtimeID string
-	if err := testPool.QueryRow(ctx, `
-		SELECT id::text, runtime_id::text
-		FROM agent
-		WHERE workspace_id = $1
-		ORDER BY created_at ASC
-		LIMIT 1
-	`, testWorkspaceID).Scan(&agentID, &runtimeID); err != nil {
-		t.Fatalf("lookup fixture agent: %v", err)
-	}
-	issueID := createTestIssue(t, testWorkspaceID, testUserID)
-	task, err := queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
-		AgentID:   util.MustParseUUID(agentID),
-		RuntimeID: util.MustParseUUID(runtimeID),
-		IssueID:   util.MustParseUUID(issueID),
-		Priority:  0,
-	})
-	if err != nil {
-		t.Fatalf("CreateAgentTask: %v", err)
-	}
-	taskID := util.UUIDToString(task.ID)
-	t.Cleanup(func() {
-		_, _ = testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
-	})
-
-	rows := []db.CreateTaskMessageParams{
-		{TaskID: util.MustParseUUID(taskID), Seq: 1, Type: "thinking", Content: pgtype.Text{String: "hidden chain", Valid: true}},
-		{TaskID: util.MustParseUUID(taskID), Seq: 2, Type: "text", Content: pgtype.Text{String: "Implemented customer import", Valid: true}},
-		{TaskID: util.MustParseUUID(taskID), Seq: 3, Type: "tool_use", Tool: pgtype.Text{String: "go test", Valid: true}},
-		{TaskID: util.MustParseUUID(taskID), Seq: 4, Type: "tool_result", Tool: pgtype.Text{String: "go test", Valid: true}, Output: pgtype.Text{String: "ok ./internal/service\nAPI_KEY=secret", Valid: true}},
-		{TaskID: util.MustParseUUID(taskID), Seq: 5, Type: "error", Content: pgtype.Text{String: "retry warning", Valid: true}},
-	}
-	for _, row := range rows {
-		if _, err := queries.CreateTaskMessage(ctx, row); err != nil {
-			t.Fatalf("CreateTaskMessage: %v", err)
-		}
-	}
-
-	got := completedTaskTranscriptText(ctx, queries, map[string]any{"task_id": taskID})
-	for _, want := range []string{
-		"Implemented customer import",
-		"Tool started: go test",
-		"Tool finished: go test",
-		"ok ./internal/service",
-		"[REDACTED CREDENTIAL]",
-		"Error: retry warning",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("transcript missing %q\ntranscript: %s", want, got)
-		}
-	}
-	if strings.Contains(got, "hidden chain") || strings.Contains(got, "secret") {
-		t.Fatalf("transcript included forbidden content: %s", got)
 	}
 }
 

@@ -146,61 +146,6 @@ func completedTaskResultText(ctx context.Context, queries *db.Queries, payload m
 	return redact.Text(taskResultTextFromTaskResult(task.Result))
 }
 
-func completedTaskTranscriptText(ctx context.Context, queries *db.Queries, payload map[string]any) string {
-	taskID, _ := payload["task_id"].(string)
-	if taskID == "" {
-		return ""
-	}
-	messages, err := queries.ListTaskMessages(ctx, parseUUID(taskID))
-	if err != nil {
-		slog.Warn("task:completed email: failed to list task messages", "task_id", taskID, "error", err)
-		return ""
-	}
-
-	var b strings.Builder
-	for _, msg := range messages {
-		var line string
-		switch msg.Type {
-		case "text":
-			if msg.Content.Valid {
-				line = strings.TrimSpace(msg.Content.String)
-			}
-		case "tool_use":
-			tool := strings.TrimSpace(msg.Tool.String)
-			if tool == "" {
-				tool = "tool"
-			}
-			line = "Tool started: " + tool
-		case "tool_result":
-			tool := strings.TrimSpace(msg.Tool.String)
-			if tool == "" {
-				tool = "tool"
-			}
-			output := strings.TrimSpace(msg.Output.String)
-			if output == "" {
-				line = "Tool finished: " + tool
-			} else {
-				line = "Tool finished: " + tool + "\n" + output
-			}
-		case "error":
-			if msg.Content.Valid {
-				line = "Error: " + strings.TrimSpace(msg.Content.String)
-			}
-		default:
-			continue
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
-		}
-		b.WriteString(line)
-	}
-	return redact.Text(b.String())
-}
-
 func sendTaskStatusEmails(
 	ctx context.Context,
 	queries *db.Queries,
@@ -212,7 +157,6 @@ func sendTaskStatusEmails(
 	status string,
 	errorText string,
 	resultText string,
-	transcriptText string,
 ) {
 	if emailSvc == nil {
 		return
@@ -254,7 +198,6 @@ func sendTaskStatusEmails(
 			Status:        status,
 			Error:         errorText,
 			Result:        resultText,
-			Transcript:    transcriptText,
 		}); err != nil {
 			slog.Error("task status email: send failed",
 				"to", row.Email, "issue_id", util.UUIDToString(issue.ID), "type", notifType, "error", err)
@@ -1114,8 +1057,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries, emailSe
 
 		sendTaskStatusEmails(ctx, queries, emailSvc, e, workspace, issue,
 			"task_completed", taskStatusFromEventType(e.Type), "",
-			completedTaskResultText(ctx, queries, payload),
-			completedTaskTranscriptText(ctx, queries, payload))
+			completedTaskResultText(ctx, queries, payload))
 	})
 
 	// task:failed — notify all subscribers except the agent
@@ -1141,7 +1083,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries, emailSe
 				"workspace_id", e.WorkspaceID, "issue_id", issueID, "error", err)
 		} else {
 			sendTaskStatusEmails(ctx, queries, emailSvc, e, workspace, issue,
-				"task_failed", taskStatusFromEventType(e.Type), taskFailureText(payload), "", "")
+				"task_failed", taskStatusFromEventType(e.Type), taskFailureText(payload), "")
 		}
 
 		exclude := map[string]bool{}

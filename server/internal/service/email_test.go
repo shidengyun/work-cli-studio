@@ -461,26 +461,26 @@ func TestBuildTaskStatusEmailHTML_TruncatesLongResult(t *testing.T) {
 	}
 }
 
-func TestBuildTaskStatusEmailHTML_IncludesEscapedRedactedTranscript(t *testing.T) {
+func TestBuildTaskStatusEmailHTML_ExcludesExecutionLog(t *testing.T) {
 	body := buildTaskStatusEmailHTML(TaskStatusEmail{
 		WorkspaceName: "Acme",
 		IssueTitle:    "Customer import",
 		Status:        "completed",
-		Transcript:    "Tool finished: go test\nok <all>\nAPI_KEY=secret",
+		Result:        "Finished customer import",
 	})
 
-	for _, want := range []string{
+	for _, forbidden := range []string{
 		"Execution log",
 		"Tool finished: go test",
-		"ok &lt;all&gt;",
-		"[REDACTED CREDENTIAL]",
+		"using-superpowers",
+		"Skill tool",
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("body missing %q\nbody: %s", want, body)
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("body contains execution log content %q\nbody: %s", forbidden, body)
 		}
 	}
-	if strings.Contains(body, "<all>") || strings.Contains(body, "secret") {
-		t.Fatalf("body contains raw transcript content\nbody: %s", body)
+	if !strings.Contains(body, "Finished customer import") {
+		t.Fatalf("body missing final result\nbody: %s", body)
 	}
 }
 

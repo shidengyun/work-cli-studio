@@ -25,7 +25,6 @@ import (
 // a full phishing pitch into a workspace name that gets sent from our domain.
 const maxSubjectFieldRunes = 60
 const maxTaskResultEmailRunes = 4000
-const maxTaskTranscriptEmailRunes = 12000
 
 type EmailService struct {
 	client          *resend.Client
@@ -48,7 +47,6 @@ type TaskStatusEmail struct {
 	Status        string
 	Error         string
 	Result        string
-	Transcript    string
 }
 
 type smtpAuthClient interface {
@@ -481,7 +479,6 @@ func buildTaskStatusEmailHTML(msg TaskStatusEmail) string {
 	safeIssueURL := html.EscapeString(msg.IssueURL)
 	safeError := html.EscapeString(msg.Error)
 	safeResult := html.EscapeString(truncateEmailText(redact.Text(msg.Result), maxTaskResultEmailRunes))
-	safeTranscript := html.EscapeString(truncateEmailText(redact.Text(msg.Transcript), maxTaskTranscriptEmailRunes))
 
 	body := fmt.Sprintf(
 		`<div style="font-family: sans-serif; max-width: 520px; margin: 0 auto;">
@@ -503,13 +500,6 @@ func buildTaskStatusEmailHTML(msg TaskStatusEmail) string {
 			`<h3 style="margin-top: 24px;">Result</h3>
 			<pre style="white-space: pre-wrap; word-break: break-word; padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; color: #0f172a;">%s</pre>`,
 			safeResult,
-		)
-	}
-	if safeTranscript != "" {
-		body += fmt.Sprintf(
-			`<h3 style="margin-top: 24px;">Execution log</h3>
-			<pre style="white-space: pre-wrap; word-break: break-word; padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; color: #0f172a;">%s</pre>`,
-			safeTranscript,
 		)
 	}
 	if safeIssueURL != "" {
