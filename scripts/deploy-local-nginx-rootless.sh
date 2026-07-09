@@ -7,7 +7,9 @@ NGINX_PREFIX="${NGINX_PREFIX:-${HOME}/.multica/nginx}"
 BACKEND_PORT="${BACKEND_PORT:-18080}"
 WEB_PORT="${WEB_PORT:-13000}"
 NGINX_PORT="${NGINX_PORT:-18000}"
-PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-http://localhost:${NGINX_PORT}}"
+NGINX_LISTEN_HOST="${NGINX_LISTEN_HOST:-0.0.0.0}"
+PUBLIC_HOST="${PUBLIC_HOST:-}"
+PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-}"
 ENV_FILE="${ENV_FILE:-${ROOT}/.env}"
 BACKEND_LABEL="ai.multica.backend"
 WEB_LABEL="ai.multica.web"
@@ -84,6 +86,35 @@ append_no_proxy_hosts() {
 
 append_no_proxy_hosts localhost 127.0.0.1 ::1
 
+detect_lan_ip() {
+  local ip
+
+  ip="$(ipconfig getifaddr en0 2>/dev/null || true)"
+  if [ -z "$ip" ]; then
+    ip="$(ipconfig getifaddr en1 2>/dev/null || true)"
+  fi
+  if [ -z "$ip" ]; then
+    ip="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}' | xargs -I{} ipconfig getifaddr {} 2>/dev/null || true)"
+  fi
+  if [ -z "$ip" ]; then
+    ip="localhost"
+  fi
+
+  printf '%s\n' "$ip"
+}
+
+if [ -z "$PUBLIC_HOST" ]; then
+  PUBLIC_HOST="$(detect_lan_ip)"
+fi
+
+if [ -z "$PUBLIC_ORIGIN" ]; then
+  PUBLIC_ORIGIN="http://${PUBLIC_HOST}:${NGINX_PORT}"
+fi
+
+if [ "$PUBLIC_HOST" != "localhost" ] && [ "$PUBLIC_HOST" != "127.0.0.1" ]; then
+  append_no_proxy_hosts "$PUBLIC_HOST"
+fi
+
 if [ -z "$NGINX_BIN" ]; then
   echo "nginx not found in PATH" >&2
   exit 1
@@ -136,8 +167,8 @@ write_env_value "FRONTEND_PORT" "$WEB_PORT" "$ENV_FILE"
 write_env_value "FRONTEND_ORIGIN" "$PUBLIC_ORIGIN" "$ENV_FILE"
 write_env_value "MULTICA_APP_URL" "$PUBLIC_ORIGIN" "$ENV_FILE"
 write_env_value "GOOGLE_REDIRECT_URI" "${PUBLIC_ORIGIN}/auth/callback" "$ENV_FILE"
-write_env_value "NEXT_PUBLIC_API_URL" "$PUBLIC_ORIGIN" "$ENV_FILE"
-write_env_value "NEXT_PUBLIC_WS_URL" "ws://localhost:${NGINX_PORT}/ws" "$ENV_FILE"
+write_env_value "NEXT_PUBLIC_API_URL" "" "$ENV_FILE"
+write_env_value "NEXT_PUBLIC_WS_URL" "" "$ENV_FILE"
 write_env_value "LOCAL_UPLOAD_BASE_URL" "$PUBLIC_ORIGIN" "$ENV_FILE"
 
 # shellcheck disable=SC1090
@@ -162,8 +193,8 @@ cd "$ROOT"
 log "Build frontend standalone"
 export STANDALONE=true
 export REMOTE_API_URL="http://127.0.0.1:${BACKEND_PORT}"
-export NEXT_PUBLIC_API_URL="$PUBLIC_ORIGIN"
-export NEXT_PUBLIC_WS_URL="ws://localhost:${NGINX_PORT}/ws"
+export NEXT_PUBLIC_API_URL=""
+export NEXT_PUBLIC_WS_URL=""
 export NEXT_PUBLIC_APP_VERSION="local"
 pnpm --filter @multica/web build
 
@@ -209,8 +240,8 @@ http {
     }
 
     server {
-        listen ${NGINX_PORT};
-        server_name localhost;
+        listen ${NGINX_LISTEN_HOST}:${NGINX_PORT};
+        server_name _;
 
         client_max_body_size 100m;
 
@@ -219,7 +250,8 @@ http {
             proxy_http_version 1.1;
             proxy_set_header Upgrade \$http_upgrade;
             proxy_set_header Connection \$connection_upgrade;
-            proxy_set_header Host \$host;
+            proxy_set_header Host \$http_host;
+            proxy_set_header X-Forwarded-Host \$http_host;
             proxy_set_header X-Real-IP \$remote_addr;
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
@@ -228,7 +260,8 @@ http {
 
         location /api/ {
             proxy_pass http://127.0.0.1:${BACKEND_PORT}/api/;
-            proxy_set_header Host \$host;
+            proxy_set_header Host \$http_host;
+            proxy_set_header X-Forwarded-Host \$http_host;
             proxy_set_header X-Real-IP \$remote_addr;
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
@@ -236,7 +269,8 @@ http {
 
         location /auth/ {
             proxy_pass http://127.0.0.1:${BACKEND_PORT}/auth/;
-            proxy_set_header Host \$host;
+            proxy_set_header Host \$http_host;
+            proxy_set_header X-Forwarded-Host \$http_host;
             proxy_set_header X-Real-IP \$remote_addr;
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
@@ -244,7 +278,8 @@ http {
 
         location /uploads/ {
             proxy_pass http://127.0.0.1:${BACKEND_PORT}/uploads/;
-            proxy_set_header Host \$host;
+            proxy_set_header Host \$http_host;
+            proxy_set_header X-Forwarded-Host \$http_host;
             proxy_set_header X-Real-IP \$remote_addr;
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
@@ -253,7 +288,8 @@ http {
         location / {
             proxy_pass http://127.0.0.1:${WEB_PORT};
             proxy_http_version 1.1;
-            proxy_set_header Host \$host;
+            proxy_set_header Host \$http_host;
+            proxy_set_header X-Forwarded-Host \$http_host;
             proxy_set_header X-Real-IP \$remote_addr;
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
@@ -390,6 +426,7 @@ cat <<DONE
 ✓ Multica deployed rootlessly behind user nginx.
 
   Public URL:   ${PUBLIC_ORIGIN}
+  Listen:       ${NGINX_LISTEN_HOST}:${NGINX_PORT}
   Backend:      http://127.0.0.1:${BACKEND_PORT}
   Frontend:     http://127.0.0.1:${WEB_PORT}
   Deploy dir:   ${DEPLOY_DIR}

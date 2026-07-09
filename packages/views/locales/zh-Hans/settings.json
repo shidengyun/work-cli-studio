@@ -21,6 +21,11 @@
       "sync_failed": "保存时区偏好失败。"
     }
   },
+  "chat": {
+    "floating_title": "悬浮窗",
+    "floating_label": "悬浮聊天窗",
+    "floating_hint": "在每个页面右下角显示悬浮聊天按钮。默认关闭——打开后可随处召唤聊天；关闭时，聊天只在此标签页中可用。"
+  },
   "page": {
     "title": "设置",
     "my_account": "我的账号",
@@ -28,6 +33,7 @@
     "tabs": {
       "profile": "个人资料",
       "preferences": "偏好设置",
+      "chat": "聊天",
       "notifications": "通知",
       "tokens": "API Token",
       "general": "通用",
@@ -302,22 +308,20 @@
   },
   "composio": {
     "section_title": "Composio",
-    "page_description": "浏览 Composio 的全部 toolkit，连接你的 agent 可以操作的应用。目前只有已配置 auth config 的 toolkit 可以连接。",
+    "page_description": "连接你的 agent 可以操作的 Composio 应用。这里只展示你在 Composio 项目里已配置（启用了 auth config）的应用。",
     "not_enabled_title": "Composio 集成未启用",
     "not_enabled_description_prefix": "在服务器上设置",
     "not_enabled_description_suffix": "以启用 Composio toolkit 连接。",
     "loading": "正在加载 toolkit…",
     "load_failed": "加载 Composio toolkit 失败。",
-    "empty_title": "没有可用的 toolkit",
-    "empty_description": "Composio 未返回任何 toolkit。请检查 API key 和项目配置。",
+    "empty_title": "还没有可连接的应用",
+    "empty_description": "你的 Composio 项目里还没有启用 auth config 的 toolkit。请在 Composio 后台启用一个 auth config，它才会出现在这里。",
     "search_placeholder": "搜索 toolkit…",
     "connect": "连接",
     "connecting": "连接中…",
     "connected": "已连接",
     "disconnect": "断开",
     "disconnecting": "断开中…",
-    "not_connectable": "未配置",
-    "not_connectable_hint": "该 toolkit 在你的 Composio 项目中还没有 auth config，因此无法连接。请在 Composio 后台为它添加一个 auth config 后再连接。",
     "connect_failed": "无法发起连接，请重试。",
     "disconnect_failed": "无法断开连接，请重试。",
     "toast_disconnected": "已断开",

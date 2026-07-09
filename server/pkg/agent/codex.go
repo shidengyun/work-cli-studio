@@ -380,15 +380,24 @@ func renderCodexMcpServersBlock(raw json.RawMessage) (string, bool, error) {
 
 func normalizeCodexMcpServerConfig(server map[string]any) map[string]any {
 	if !isCodexRemoteMcpServer(server) {
-		return server
+		normalized := make(map[string]any, len(server))
+		for k, v := range server {
+			if isMulticaMcpSelectorKey(k) {
+				continue
+			}
+			normalized[k] = v
+		}
+		return normalized
 	}
 
 	normalized := make(map[string]any, len(server)+1)
 	for k, v := range server {
-		switch k {
-		case "type":
+		switch {
+		case isMulticaMcpSelectorKey(k):
 			continue
-		case "headers":
+		case k == "type":
+			continue
+		case k == "headers":
 			if _, ok := server["http_headers"]; !ok {
 				normalized["http_headers"] = v
 			}
@@ -398,6 +407,15 @@ func normalizeCodexMcpServerConfig(server map[string]any) map[string]any {
 	}
 	normalized["experimental_use_rmcp_client"] = true
 	return normalized
+}
+
+func isMulticaMcpSelectorKey(k string) bool {
+	switch k {
+	case "tools", "prompts", "resources":
+		return true
+	default:
+		return false
+	}
 }
 
 func isCodexRemoteMcpServer(server map[string]any) bool {
@@ -866,13 +884,38 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		// MUL-2339 — Trump's constraint that the three injection points
 		// must not drift independently).
 		applyCodexReasoningEffort(turnParams, opts.ThinkingLevel)
+		waitingForTurn := true
+		var timeoutDiagnostic codexTimeoutDiagnostic
+		var processExitErr error
+		finishTurn := func(aborted bool) {
+			waitingForTurn = false
+			switch {
+			case aborted:
+				finalStatus = "aborted"
+				if errMsg := c.getTurnError(); errMsg != "" {
+					finalError = errMsg
+				} else {
+					finalError = "turn was aborted"
+				}
+			default:
+				if errMsg := c.getTurnError(); errMsg != "" {
+					finalStatus = "failed"
+					finalError = errMsg
+				}
+			}
+		}
 		_, err = c.request(runCtx, "turn/start", turnParams)
 		if err != nil {
-			drainAndWait() // flush os/exec stderr goroutine before sampling Tail
-			finalStatus = "failed"
-			finalError = withAgentStderr(fmt.Sprintf("codex turn/start failed: %v", err), "codex", stderrBuf.Tail())
-			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
-			return
+			select {
+			case aborted := <-turnDone:
+				finishTurn(aborted)
+			default:
+				drainAndWait() // flush os/exec stderr goroutine before sampling Tail
+				finalStatus = "failed"
+				finalError = withAgentStderr(fmt.Sprintf("codex turn/start failed: %v", err), "codex", stderrBuf.Tail())
+				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
+				return
+			}
 		}
 
 		lastSemanticActivity := time.Now()
@@ -894,26 +937,6 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		}
 		defer stopFirstTurnNoProgressTimer()
 
-		waitingForTurn := true
-		var timeoutDiagnostic codexTimeoutDiagnostic
-		var processExitErr error
-		finishTurn := func(aborted bool) {
-			waitingForTurn = false
-			switch {
-			case aborted:
-				finalStatus = "aborted"
-				if errMsg := c.getTurnError(); errMsg != "" {
-					finalError = errMsg
-				} else {
-					finalError = "turn was aborted"
-				}
-			default:
-				if errMsg := c.getTurnError(); errMsg != "" {
-					finalStatus = "failed"
-					finalError = errMsg
-				}
-			}
-		}
 		finishRunContextDone := func() {
 			waitingForTurn = false
 			if runCtx.Err() == context.DeadlineExceeded {
@@ -1434,6 +1457,11 @@ func (c *codexClient) request(ctx context.Context, method string, params any) (j
 	case res := <-pr.ch:
 		return res.result, res.err
 	case <-processDone:
+		select {
+		case res := <-pr.ch:
+			return res.result, res.err
+		default:
+		}
 		c.mu.Lock()
 		delete(c.pending, id)
 		err := c.processErr

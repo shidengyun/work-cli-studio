@@ -228,6 +228,17 @@
     "description_label": "描述",
     "description_placeholder": "这个智能体做什么？",
     "visibility_label": "可见性",
+    "access": {
+      "label": "访问权限",
+      "private_title": "私有",
+      "private_desc": "只有你可以运行该智能体",
+      "public_title": "公开",
+      "public_desc": "选择谁可以运行该智能体",
+      "public_workspace_option": "工作区内所有人",
+      "public_members_group": "指定成员",
+      "public_members_empty": "没有可选择的工作区成员",
+      "public_targets_empty_hint": "至少勾选下方一项 —— 否则该智能体仍为私有。"
+    },
     "runtime_label": "运行时",
     "runtime_filter_mine": "我的",
     "runtime_filter_all": "全部",
@@ -236,6 +247,9 @@
     "runtime_cloud_badge": "云端",
     "runtime_private_badge": "私有",
     "runtime_private_locked_tooltip": "私有运行时——只有 runtime 所有者或工作区管理员可在其上创建智能体。如果需要共享，请联系所有者切换为「公开」。",
+    "runtime_search_placeholder": "搜索机器…",
+    "runtime_no_results": "没有匹配的机器",
+    "runtime_group_online": "{{online}}/{{total}} 在线",
     "duplicate_copy_suffix": "（副本）",
     "create": "创建",
     "creating": "创建中...",
@@ -464,7 +478,9 @@
     "runtime_label": "运行时",
     "skills_label": "Skills",
     "owner_label": "所有者",
-    "unknown_runtime": "未知运行时"
+    "unknown_runtime": "未知运行时",
+    "model_label": "模型",
+    "model_unset": "运行时默认"
   },
   "live_peek": {
     "current_issue_label": "正在处理",
@@ -490,7 +506,11 @@
     "no_data": "未记录执行数据。",
     "sort_label": "排序",
     "sort_chronological": "时间顺序",
-    "sort_newest_first": "最新在前"
+    "sort_newest_first": "最新在前",
+    "expand_visible": "展开当前可见项",
+    "collapse_visible": "收起当前可见项",
+    "preserve_filters": "保留筛选",
+    "default_expanded": "默认展开详情"
   },
   "task_failure": {
     "agent_error": "智能体执行出错",

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,9 @@ const composioTestUserID = "22222222-2222-2222-2222-222222222222"
 type composioFakeSDK struct {
 	createLinkResp *sdk.CreateLinkResponse
 	revokeErr      error
+	// listAuthErr, when set, makes ListAuthConfigs fail. This propagates through
+	// Service.authConfigMap → ListToolkits, exercising the handler's 502 path.
+	listAuthErr error
 }
 
 func (f *composioFakeSDK) CreateLink(_ context.Context, _ sdk.CreateLinkRequest) (*sdk.CreateLinkResponse, error) {
@@ -54,6 +58,9 @@ func (f *composioFakeSDK) DeleteConnectedAccount(_ context.Context, _ string) er
 // ListAuthConfigs reports a single enabled notion auth config so BeginConnect
 // resolves notion → ac_notion and the callback's auth-config check matches.
 func (f *composioFakeSDK) ListAuthConfigs(_ context.Context, _ sdk.ListAuthConfigsRequest) (*sdk.ListAuthConfigsResponse, error) {
+	if f.listAuthErr != nil {
+		return nil, f.listAuthErr
+	}
 	return &sdk.ListAuthConfigsResponse{Items: []sdk.AuthConfig{{
 		ID:      "ac_notion",
 		Toolkit: sdk.Toolkit{Slug: "notion"},
@@ -224,20 +231,36 @@ func TestComposio_ListToolkits(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &toolkits); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(toolkits) != 2 {
-		t.Fatalf("expected 2 toolkits, got %d", len(toolkits))
+	// Only notion has an enabled auth config; github is filtered out server-side
+	// (MUL-4009), so a single connectable toolkit comes back.
+	if len(toolkits) != 1 {
+		t.Fatalf("expected 1 toolkit, got %d (%s)", len(toolkits), w.Body.String())
 	}
-	// notion has an enabled auth config in the fake → connectable + sorted first.
 	if toolkits[0].Slug != "notion" || !toolkits[0].Connectable {
-		t.Errorf("first toolkit = %+v, want connectable notion", toolkits[0])
+		t.Errorf("toolkit = %+v, want connectable notion", toolkits[0])
 	}
 	for _, tk := range toolkits {
-		if tk.Slug == "github" && tk.Connectable {
-			t.Error("github has no auth config and must not be connectable")
+		if tk.Slug == "github" {
+			t.Error("github has no auth config and must be filtered out")
 		}
 		if tk.Logo == "" {
 			t.Errorf("toolkit %q missing logo", tk.Slug)
 		}
+	}
+}
+
+// TestComposio_ListToolkits_ResolverErrorIs502 pins the key behavior of this
+// PR (MUL-4009): when the service can't resolve which toolkits are connectable
+// (auth-config lookup fails), ListComposioToolkits must return 502 rather than
+// silently degrading to an empty catalog. A regression back to a soft empty
+// list would render as a misleading "no apps configured" state.
+func TestComposio_ListToolkits_ResolverErrorIs502(t *testing.T) {
+	h := newComposioTestHandler(t, &composioFakeSDK{listAuthErr: errors.New("auth_configs upstream blip")}, &composioFakeStore{})
+
+	w := httptest.NewRecorder()
+	h.ListComposioToolkits(w, composioReq(http.MethodGet, "/toolkits", ""))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 on resolver error, got %d (%s)", w.Code, w.Body.String())
 	}
 }
 

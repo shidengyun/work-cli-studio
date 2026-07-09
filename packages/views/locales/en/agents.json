@@ -236,6 +236,17 @@
     "description_label": "Description",
     "description_placeholder": "What does this agent do?",
     "visibility_label": "Visibility",
+    "access": {
+      "label": "Access",
+      "private_title": "Private",
+      "private_desc": "Only you can run this agent",
+      "public_title": "Public",
+      "public_desc": "Choose who can run this agent",
+      "public_workspace_option": "Everyone in this workspace",
+      "public_members_group": "Specific people",
+      "public_members_empty": "No workspace members to choose from",
+      "public_targets_empty_hint": "Pick at least one option below — otherwise the agent stays private."
+    },
     "runtime_label": "Runtime",
     "runtime_filter_mine": "Mine",
     "runtime_filter_all": "All",
@@ -244,6 +255,9 @@
     "runtime_cloud_badge": "Cloud",
     "runtime_private_badge": "Private",
     "runtime_private_locked_tooltip": "Private runtime — only its owner or a workspace admin can create agents on it. Ask the owner to switch it to Public to share.",
+    "runtime_search_placeholder": "Search machines…",
+    "runtime_no_results": "No matching machines",
+    "runtime_group_online": "{{online}}/{{total}} online",
     "duplicate_copy_suffix": " (Copy)",
     "create": "Create",
     "creating": "Creating...",
@@ -477,7 +491,9 @@
     "runtime_label": "Runtime",
     "skills_label": "Skills",
     "owner_label": "Owner",
-    "unknown_runtime": "Unknown runtime"
+    "unknown_runtime": "Unknown runtime",
+    "model_label": "Model",
+    "model_unset": "Runtime default"
   },
   "live_peek": {
     "current_issue_label": "Now on",
@@ -505,7 +521,11 @@
     "no_data": "No execution data recorded.",
     "sort_label": "Sort",
     "sort_chronological": "Oldest first",
-    "sort_newest_first": "Newest first"
+    "sort_newest_first": "Newest first",
+    "expand_visible": "Expand visible",
+    "collapse_visible": "Collapse visible",
+    "preserve_filters": "Preserve filters",
+    "default_expanded": "Open details by default"
   },
   "task_failure": {
     "agent_error": "Agent execution error",

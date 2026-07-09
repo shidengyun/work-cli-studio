@@ -68,10 +68,12 @@ import type {
   TaskMessagePayload,
   Attachment,
   ChatSession,
+  ChatPinnedAgent,
   ChatMessage,
   ChatMessagesPage,
   ChatPendingTask,
   PendingChatTasksResponse,
+  HasPendingChatTasksResponse,
   SendChatMessageResponse,
   CancelTaskResponse,
   Project,
@@ -1167,7 +1169,17 @@ export class ApiClient {
 
   async updateRuntime(
     runtimeId: string,
-    patch: { visibility?: "private" | "public" },
+    patch: {
+      visibility?: "private" | "public";
+      /**
+       * Custom display name. Pass an empty string to clear it (the server
+       * reverts to the default name). Omit to leave it unchanged — a JSON
+       * `null` is treated as "unchanged", not "clear". See MUL-4217.
+       */
+      custom_name?: string;
+      /** Apply custom_name to every runtime on the same machine. */
+      apply_to_machine?: boolean;
+    },
   ): Promise<AgentRuntime> {
     return this.fetch(`/api/runtimes/${runtimeId}`, {
       method: "PATCH",
@@ -1791,6 +1803,36 @@ export class ApiClient {
     });
   }
 
+  async setChatSessionPinned(id: string, pinned: boolean): Promise<ChatSession> {
+    return this.fetch(`/api/chat/sessions/${id}/pin`, {
+      method: "PATCH",
+      body: JSON.stringify({ pinned }),
+    });
+  }
+
+  async setChatSessionArchived(id: string, archived: boolean): Promise<ChatSession> {
+    return this.fetch(`/api/chat/sessions/${id}/archive`, {
+      method: "PATCH",
+      body: JSON.stringify({ archived }),
+    });
+  }
+
+  // Quick-agent bar: per-user pinned agents.
+  async listChatPinnedAgents(): Promise<ChatPinnedAgent[]> {
+    return this.fetch("/api/chat/pinned-agents");
+  }
+
+  async pinChatAgent(agentId: string): Promise<ChatPinnedAgent> {
+    return this.fetch("/api/chat/pinned-agents", {
+      method: "POST",
+      body: JSON.stringify({ agent_id: agentId }),
+    });
+  }
+
+  async unpinChatAgent(agentId: string): Promise<void> {
+    await this.fetch(`/api/chat/pinned-agents/${agentId}`, { method: "DELETE" });
+  }
+
   async listChatMessages(sessionId: string): Promise<ChatMessage[]> {
     return this.fetch(`/api/chat/sessions/${sessionId}/messages`);
   }
@@ -1847,6 +1889,10 @@ export class ApiClient {
 
   async listPendingChatTasks(): Promise<PendingChatTasksResponse> {
     return this.fetch(`/api/chat/pending-tasks`);
+  }
+
+  async hasAnyPendingChatTasks(): Promise<HasPendingChatTasksResponse> {
+    return this.fetch(`/api/chat/pending-tasks/has-any`);
   }
 
   async markChatSessionRead(sessionId: string): Promise<void> {
@@ -2322,8 +2368,10 @@ export class ApiClient {
   // Composio integration (MUL-3720). All routes are user-scoped (a connection
   // belongs to a user, not a workspace), so none take a workspaceId.
 
-  /** Full Composio toolkit catalog, each annotated with `connectable`
-   * (whether the project has an enabled auth config for it). */
+  /** The project's connectable Composio toolkits (those with an enabled auth
+   * config). Since MUL-4009 the backend filters out non-connectable toolkits,
+   * so every entry has `connectable: true`. A resolver/upstream failure is a
+   * 502 rather than an empty list. */
   async listComposioToolkits(): Promise<ComposioToolkit[]> {
     return this.fetch(`/api/integrations/composio/toolkits`);
   }

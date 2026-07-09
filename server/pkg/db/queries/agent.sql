@@ -568,11 +568,37 @@ RETURNING *;
 
 -- name: FailStaleTasks :many
 -- Fails tasks stuck in dispatched/running beyond the given thresholds.
--- Handles cases where the daemon is alive but the task is orphaned
--- (e.g. agent process hung, daemon failed to report completion).
--- Dispatched tasks with an active prepare lease are excluded because the
--- daemon is still proving liveness while resolving/cache/preparing startup
--- inputs before StartTask.
+--
+-- Each branch pairs a wall-clock deadline with a task-appropriate liveness
+-- signal, so the sweeper only kills tasks whose owning daemon is no longer
+-- proving it is alive:
+--
+--   * Dispatched: `prepare_lease_expires_at` is refreshed every 15s by the
+--     daemon between claim and StartTask (see startTaskPrepareLeaseExtender).
+--     A live lease excludes the row.
+--
+--   * Running: no per-task lease is renewed once StartTask fires, so we key
+--     off the daemon-wide heartbeat instead — `agent_runtime.last_seen_at`,
+--     which the daemon bumps every ~15s while it is up. A running task whose
+--     runtime is `online` AND whose `last_seen_at` is within
+--     @runtime_stale_secs is treated as alive and is NOT killed by this
+--     wall-clock backstop, even after `started_at` exceeds the running
+--     timeout. This is what lets healthy multi-hour research / training runs
+--     survive on self-hosted deployments (MUL-4107): the daemon side is
+--     bounded only by inactivity watchdogs (idle / per-tool), so the
+--     server-side wall clock must not shadow that with a coarser cap.
+--
+-- The daemon-dead case is the primary responsibility of `sweepStaleRuntimes`
+-- (which mixes DB `last_seen_at` with the Redis LivenessStore and calls
+-- `FailTasksForOfflineRuntimes` in the same tick). The wall-clock branch
+-- here is a defensive backstop for pathological cases where a runtime row
+-- somehow retains status='online' with a stale DB heartbeat for longer than
+-- the wall clock allows.
+--
+-- runtime_id IS NULL: a running row with no runtime is by definition not
+-- proving liveness, so the wall clock is allowed to fire — same shape as
+-- the legacy pure-wall-clock behavior for that (rare / historical) case.
+--
 -- waiting_local_directory rows are intentionally excluded: the daemon owns
 -- the wait (with its own ctx-driven timeout) and a legitimate queue ahead
 -- of this task can exceed the dispatch / running timeouts without being
@@ -587,7 +613,16 @@ WHERE (
     AND dispatched_at < now() - make_interval(secs => @dispatch_timeout_secs::double precision)
     AND (prepare_lease_expires_at IS NULL OR prepare_lease_expires_at < now())
   )
-   OR (status = 'running' AND started_at < now() - make_interval(secs => @running_timeout_secs::double precision))
+   OR (
+    status = 'running'
+    AND started_at < now() - make_interval(secs => @running_timeout_secs::double precision)
+    AND NOT EXISTS (
+      SELECT 1 FROM agent_runtime r
+      WHERE r.id = agent_task_queue.runtime_id
+        AND r.status = 'online'
+        AND r.last_seen_at >= now() - make_interval(secs => @runtime_stale_secs::double precision)
+    )
+  )
 RETURNING *;
 
 -- name: ExpireStaleQueuedTasks :many
@@ -695,14 +730,91 @@ WHERE issue_id = @issue_id
     OR context->>'head_sha' = sqlc.narg('head_sha')::text
   );
 
--- name: GetLatestTaskIsLeaderForIssueAndAgent :one
--- Returns the is_leader_task flag of the agent's most recent task on this
--- issue, or NULL if the agent has never had a task on this issue. Used by
--- the squad-leader self-trigger guard to tell whether the agent's last
--- activity on the issue was in the leader role or the worker role (an
--- agent that holds both roles in a squad would otherwise be skipped by
--- the role-blind authorID == leaderID check).
-SELECT is_leader_task FROM agent_task_queue
+-- name: MergeCommentIntoPendingTask :one
+-- MUL-4195: fold a newly-arrived comment into an existing task for (issue,
+-- agent) that has NOT yet been claimed, instead of letting the
+-- HasPendingTaskForIssueAndAgent dedup silently DROP it. The task's prior
+-- trigger_comment_id becomes a coalesced ("also cover") comment and
+-- @new_trigger_comment_id becomes the new trigger, so the injected prompt shows
+-- the latest deliberate instruction while the single run is still told to
+-- address every folded comment.
+--
+-- Target is restricted to the single 'queued' task on purpose (MUL-4195 review
+-- rounds 2–4). This merge is only reached when HasPendingTaskForIssueAndAgent
+-- matched a 'queued'/'dispatched' task, and 'dispatched' is deliberately NOT a
+-- target: a dispatched / waiting_local_directory / running task has already had
+-- its claim response (with its coalesced_comment_ids) built and shipped, so
+-- folding a comment in afterward would mark an undelivered comment as delivered;
+-- those are handled by completion reconciliation instead. 'deferred' is also NOT
+-- a target: a deferred row is an assignee-fallback escalation with its own
+-- fire_at/promotion lifecycle, and it never sets AlreadyPending
+-- (HasPendingTaskForIssueAndAgent only looks at queued/dispatched). If a newer
+-- deferred fallback and an older queued task coexisted, a status-IN target would
+-- pick the deferred one by created_at and steal the coalescing target away from
+-- the queued run that is actually about to be claimed — so we match ONLY the
+-- queued row (the idx_one_pending_task_per_issue_agent unique index guarantees
+-- at most one). Because merges only ever touch that pre-claim queued row,
+-- coalesced_comment_ids == the set the run actually received.
+--
+-- Recompute-on-merge (MUL-4195 review must-fix #1): originator_user_id,
+-- runtime_mcp_overlay and runtime_connected_apps are re-stamped to the NEW
+-- trigger comment's originator (computed by the caller). Earlier this only
+-- repointed the trigger and kept the old originator's overlay/attribution, so a
+-- run answering user B's comment could execute under user A's connected-app
+-- capabilities and audit identity. Re-stamping means the single coalescing run
+-- carries the latest deliberate instruction's originator and the matching
+-- overlay — no cross-user capability bleed, no stale attribution. This also
+-- removes the previous originator gate + fresh-enqueue fallback, which could not
+-- create a second task anyway (the idx_one_pending_task_per_issue_agent unique
+-- index allows only one queued/dispatched task per (issue, agent)) and therefore
+-- silently dropped the mismatched-originator comment.
+--
+-- Returns pgx.ErrNoRows when no queued task exists (it was claimed/started
+-- between the dedup check and this call, or the only task is already
+-- dispatched/running). The caller must NOT blindly enqueue a fresh task in that
+-- case — a dispatched sibling would trip the unique index — it defers to
+-- completion reconciliation unless no active task exists at all.
+UPDATE agent_task_queue
+SET coalesced_comment_ids = (
+        SELECT COALESCE(array_agg(DISTINCT e), '{}')
+        FROM unnest(array_append(coalesced_comment_ids, trigger_comment_id)) AS e
+        WHERE e IS NOT NULL AND e <> @new_trigger_comment_id::uuid
+    ),
+    trigger_comment_id = @new_trigger_comment_id::uuid,
+    trigger_summary = COALESCE(sqlc.narg('new_trigger_summary'), trigger_summary),
+    originator_user_id = sqlc.narg('new_originator_user_id')::uuid,
+    runtime_mcp_overlay = sqlc.narg('new_runtime_mcp_overlay'),
+    runtime_connected_apps = sqlc.narg('new_runtime_connected_apps')
+WHERE id = (
+    SELECT t.id FROM agent_task_queue t
+    WHERE t.issue_id = @issue_id
+      AND t.agent_id = @agent_id
+      AND t.status = 'queued'
+    ORDER BY t.created_at DESC
+    LIMIT 1
+)
+RETURNING id, coalesced_comment_ids;
+
+-- name: HasActiveTaskForIssueAndAgent :one
+-- MUL-4195: true when the (issue, agent) pair has any non-terminal task in a
+-- state whose completion will run completion reconciliation — queued,
+-- dispatched, running, or waiting_local_directory. Used by the comment enqueue
+-- path: when a merge into a pre-claim task fails (the task is already
+-- dispatched/running, or a mismatched pre-claim task exists), a fresh queued
+-- INSERT would collide with idx_one_pending_task_per_issue_agent AND would risk
+-- a duplicate run. Instead the caller relies on that active task's completion
+-- reconcile to schedule the guaranteed follow-up, and only enqueues fresh when
+-- NO active task exists.
+SELECT count(*) > 0 AS has_active FROM agent_task_queue
+WHERE issue_id = $1 AND agent_id = $2
+  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory');
+
+-- name: GetLatestTaskRoleForIssueAndAgent :one
+-- Returns the role markers from the agent's most recent task on this issue.
+-- Used by the squad-leader self-trigger guard to tell apart leader tasks,
+-- same-squad worker tasks, and generic agent tasks such as direct mentions or
+-- thread-parent replies.
+SELECT is_leader_task, squad_id FROM agent_task_queue
 WHERE issue_id = $1 AND agent_id = $2
 ORDER BY created_at DESC
 LIMIT 1;

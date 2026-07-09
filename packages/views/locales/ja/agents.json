@@ -220,6 +220,17 @@
     "description_label": "説明",
     "description_placeholder": "このエージェントは何をしますか？",
     "visibility_label": "公開範囲",
+    "access": {
+      "label": "アクセス",
+      "private_title": "プライベート",
+      "private_desc": "このエージェントを実行できるのはあなただけです",
+      "public_title": "公開",
+      "public_desc": "このエージェントを実行できる人を選択します",
+      "public_workspace_option": "ワークスペース全員",
+      "public_members_group": "特定のメンバー",
+      "public_members_empty": "選択できるワークスペースメンバーがいません",
+      "public_targets_empty_hint": "以下から少なくとも1つを選択してください。そうでないとエージェントはプライベートのままになります。"
+    },
     "runtime_label": "ランタイム",
     "runtime_filter_mine": "自分のもの",
     "runtime_filter_all": "すべて",
@@ -228,6 +239,9 @@
     "runtime_cloud_badge": "クラウド",
     "runtime_private_badge": "非公開",
     "runtime_private_locked_tooltip": "非公開ランタイムです。オーナーまたはワークスペースの admin のみがこのランタイム上にエージェントを作成できます。共有するには、オーナーに公開へ切り替えるよう依頼してください。",
+    "runtime_search_placeholder": "マシンを検索…",
+    "runtime_no_results": "一致するマシンがありません",
+    "runtime_group_online": "{{online}}/{{total}} オンライン",
     "duplicate_copy_suffix": " (コピー)",
     "create": "作成",
     "creating": "作成中...",
@@ -456,7 +470,9 @@
     "runtime_label": "ランタイム",
     "skills_label": "スキル",
     "owner_label": "オーナー",
-    "unknown_runtime": "不明なランタイム"
+    "unknown_runtime": "不明なランタイム",
+    "model_label": "モデル",
+    "model_unset": "ランタイム既定"
   },
   "live_peek": {
     "current_issue_label": "現在の作業",
@@ -482,7 +498,11 @@
     "no_data": "記録された実行データがありません。",
     "sort_label": "並び替え",
     "sort_chronological": "古い順",
-    "sort_newest_first": "新しい順"
+    "sort_newest_first": "新しい順",
+    "expand_visible": "表示中を展開",
+    "collapse_visible": "表示中を折りたたむ",
+    "preserve_filters": "フィルターを保持",
+    "default_expanded": "詳細をデフォルトで展開"
   },
   "task_failure": {
     "agent_error": "エージェント実行エラー",
