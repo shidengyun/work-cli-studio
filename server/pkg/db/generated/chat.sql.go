@@ -31,10 +31,48 @@ func (q *Queries) ChatSessionHasUserMessage(ctx context.Context, chatSessionID p
 	return has_user_message, err
 }
 
+const createChatDraftRestore = `-- name: CreateChatDraftRestore :one
+INSERT INTO chat_draft_restore (id, chat_session_id, task_id, content, attachment_ids)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, chat_session_id, task_id, content, attachment_ids, created_at
+`
+
+type CreateChatDraftRestoreParams struct {
+	ID            pgtype.UUID   `json:"id"`
+	ChatSessionID pgtype.UUID   `json:"chat_session_id"`
+	TaskID        pgtype.UUID   `json:"task_id"`
+	Content       string        `json:"content"`
+	AttachmentIds []pgtype.UUID `json:"attachment_ids"`
+}
+
+// Persists the deferred-cancellation draft restore (#5219) in the same tx
+// that deletes the triggering user message: the chat:cancel_finalized
+// broadcast is best-effort, so an offline client recovers the draft from
+// this row instead. id is the deleted message's id.
+func (q *Queries) CreateChatDraftRestore(ctx context.Context, arg CreateChatDraftRestoreParams) (ChatDraftRestore, error) {
+	row := q.db.QueryRow(ctx, createChatDraftRestore,
+		arg.ID,
+		arg.ChatSessionID,
+		arg.TaskID,
+		arg.Content,
+		arg.AttachmentIds,
+	)
+	var i ChatDraftRestore
+	err := row.Scan(
+		&i.ID,
+		&i.ChatSessionID,
+		&i.TaskID,
+		&i.Content,
+		&i.AttachmentIds,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const createChatMessage = `-- name: CreateChatMessage :one
-INSERT INTO chat_message (chat_session_id, role, content, task_id, failure_reason, elapsed_ms)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms
+INSERT INTO chat_message (chat_session_id, role, content, task_id, failure_reason, elapsed_ms, message_kind)
+VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::text, 'message'))
+RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind
 `
 
 type CreateChatMessageParams struct {
@@ -44,8 +82,12 @@ type CreateChatMessageParams struct {
 	TaskID        pgtype.UUID `json:"task_id"`
 	FailureReason pgtype.Text `json:"failure_reason"`
 	ElapsedMs     pgtype.Int8 `json:"elapsed_ms"`
+	MessageKind   pgtype.Text `json:"message_kind"`
 }
 
+// message_kind defaults to 'message' via COALESCE so every existing caller
+// (which omits it) keeps writing ordinary messages; the empty-reply path passes
+// 'no_response' to mark a visible turn with no text output (MUL-4351).
 func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessageParams) (ChatMessage, error) {
 	row := q.db.QueryRow(ctx, createChatMessage,
 		arg.ChatSessionID,
@@ -54,6 +96,7 @@ func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessagePa
 		arg.TaskID,
 		arg.FailureReason,
 		arg.ElapsedMs,
+		arg.MessageKind,
 	)
 	var i ChatMessage
 	err := row.Scan(
@@ -65,6 +108,7 @@ func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessagePa
 		&i.CreatedAt,
 		&i.FailureReason,
 		&i.ElapsedMs,
+		&i.MessageKind,
 	)
 	return i, err
 }
@@ -72,7 +116,7 @@ func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessagePa
 const createChatSession = `-- name: CreateChatSession :one
 INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro)
 VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5)
-RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, runtime_id, last_read_at, is_agent_intro, pinned_at
+RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at
 `
 
 type CreateChatSessionParams struct {
@@ -103,6 +147,7 @@ func (q *Queries) CreateChatSession(ctx context.Context, arg CreateChatSessionPa
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.UnreadSince,
 		&i.RuntimeID,
 		&i.LastReadAt,
 		&i.IsAgentIntro,
@@ -114,17 +159,21 @@ func (q *Queries) CreateChatSession(ctx context.Context, arg CreateChatSessionPa
 const createChatTask = `-- name: CreateChatTask :one
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, chat_session_id,
-    initiator_user_id, originator_user_id, force_fresh_session, runtime_mcp_overlay,
-    runtime_connected_apps
+    initiator_user_id, originator_user_id, accountable_user_id, force_fresh_session, runtime_mcp_overlay,
+    runtime_connected_apps, originator_source, trigger_evidence_kind, trigger_evidence_ref_id
 )
 VALUES (
     $1, $2, NULL, 'queued', $3, $4, $5,
     $6,
-    COALESCE($7::boolean, FALSE),
-    $8,
-    $9
+    $7,
+    COALESCE($8::boolean, FALSE),
+    $9,
+    $10,
+    $11,
+    $12,
+    $13
 )
-RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id
 `
 
 type CreateChatTaskParams struct {
@@ -134,11 +183,18 @@ type CreateChatTaskParams struct {
 	ChatSessionID        pgtype.UUID `json:"chat_session_id"`
 	InitiatorUserID      pgtype.UUID `json:"initiator_user_id"`
 	OriginatorUserID     pgtype.UUID `json:"originator_user_id"`
+	AccountableUserID    pgtype.UUID `json:"accountable_user_id"`
 	ForceFreshSession    pgtype.Bool `json:"force_fresh_session"`
 	RuntimeMcpOverlay    []byte      `json:"runtime_mcp_overlay"`
 	RuntimeConnectedApps []byte      `json:"runtime_connected_apps"`
+	OriginatorSource     pgtype.Text `json:"originator_source"`
+	TriggerEvidenceKind  pgtype.Text `json:"trigger_evidence_kind"`
+	TriggerEvidenceRefID pgtype.UUID `json:"trigger_evidence_ref_id"`
 }
 
+// The chat sender (initiator) is a direct_human originator and accountable;
+// attribution provenance is stamped so this path is not a NULL-source enqueue
+// bypass (MUL-4302 §2).
 func (q *Queries) CreateChatTask(ctx context.Context, arg CreateChatTaskParams) (AgentTaskQueue, error) {
 	row := q.db.QueryRow(ctx, createChatTask,
 		arg.AgentID,
@@ -147,9 +203,13 @@ func (q *Queries) CreateChatTask(ctx context.Context, arg CreateChatTaskParams) 
 		arg.ChatSessionID,
 		arg.InitiatorUserID,
 		arg.OriginatorUserID,
+		arg.AccountableUserID,
 		arg.ForceFreshSession,
 		arg.RuntimeMcpOverlay,
 		arg.RuntimeConnectedApps,
+		arg.OriginatorSource,
+		arg.TriggerEvidenceKind,
+		arg.TriggerEvidenceRefID,
 	)
 	var i AgentTaskQueue
 	err := row.Scan(
@@ -189,8 +249,87 @@ func (q *Queries) CreateChatTask(ctx context.Context, arg CreateChatTaskParams) 
 		&i.OriginatorUserID,
 		&i.RuntimeConnectedApps,
 		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
 	)
 	return i, err
+}
+
+const deleteChatDraftRestore = `-- name: DeleteChatDraftRestore :execrows
+DELETE FROM chat_draft_restore
+WHERE id = $1 AND chat_session_id = $2
+`
+
+type DeleteChatDraftRestoreParams struct {
+	ID            pgtype.UUID `json:"id"`
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+}
+
+// Idempotent consume: deleting an already-consumed restore matches no row.
+func (q *Queries) DeleteChatDraftRestore(ctx context.Context, arg DeleteChatDraftRestoreParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteChatDraftRestore, arg.ID, arg.ChatSessionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteChatDraftRestoresByArchivedRuntimeAgents = `-- name: DeleteChatDraftRestoresByArchivedRuntimeAgents :exec
+DELETE FROM chat_draft_restore
+WHERE chat_session_id IN (
+    SELECT cs.id FROM chat_session cs
+    JOIN agent a ON a.id = cs.agent_id
+    WHERE a.runtime_id = $1 AND a.archived_at IS NOT NULL
+)
+`
+
+// chat_session cascades from agent, so hard-deleting a runtime's archived agents
+// silently drops their sessions — and, without an FK, would strand the pending
+// restores (which still hold the user's prompt text) forever. Prune them in the
+// same tx, BEFORE the agent rows go: the join below needs them. Mirrors
+// DeleteChannelInstallationsByArchivedRuntimeAgents.
+func (q *Queries) DeleteChatDraftRestoresByArchivedRuntimeAgents(ctx context.Context, runtimeID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteChatDraftRestoresByArchivedRuntimeAgents, runtimeID)
+	return err
+}
+
+const deleteChatDraftRestoresBySession = `-- name: DeleteChatDraftRestoresBySession :exec
+DELETE FROM chat_draft_restore
+WHERE chat_session_id = $1
+`
+
+// chat_draft_restore carries no chat_session FK (MUL-3515), so DeleteChatSession
+// prunes its pending restores in the same tx that deletes the session.
+func (q *Queries) DeleteChatDraftRestoresBySession(ctx context.Context, chatSessionID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteChatDraftRestoresBySession, chatSessionID)
+	return err
+}
+
+const deleteChatDraftRestoresBySystemRuntimeAgents = `-- name: DeleteChatDraftRestoresBySystemRuntimeAgents :exec
+DELETE FROM chat_draft_restore
+WHERE chat_session_id IN (
+    SELECT cs.id FROM chat_session cs
+    JOIN agent a ON a.id = cs.agent_id
+    WHERE a.runtime_id = $1 AND a.kind = 'system'
+)
+`
+
+// Same cascade, for the system agents a runtime teardown also hard-deletes
+// (DeleteSystemAgentsByRuntime). Split from the archived-agent prune because the
+// runtime-profile teardown deletes only archived agents: pruning system-agent
+// sessions there would destroy restores whose session survives.
+func (q *Queries) DeleteChatDraftRestoresBySystemRuntimeAgents(ctx context.Context, runtimeID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteChatDraftRestoresBySystemRuntimeAgents, runtimeID)
+	return err
 }
 
 const deleteChatSession = `-- name: DeleteChatSession :exec
@@ -218,7 +357,7 @@ func (q *Queries) DeleteChatSession(ctx context.Context, arg DeleteChatSessionPa
 const deleteUserChatMessageByTask = `-- name: DeleteUserChatMessageByTask :one
 DELETE FROM chat_message
 WHERE task_id = $1 AND role = 'user'
-RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms
+RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind
 `
 
 func (q *Queries) DeleteUserChatMessageByTask(ctx context.Context, taskID pgtype.UUID) (ChatMessage, error) {
@@ -233,12 +372,13 @@ func (q *Queries) DeleteUserChatMessageByTask(ctx context.Context, taskID pgtype
 		&i.CreatedAt,
 		&i.FailureReason,
 		&i.ElapsedMs,
+		&i.MessageKind,
 	)
 	return i, err
 }
 
 const getChatMessage = `-- name: GetChatMessage :one
-SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind FROM chat_message
 WHERE id = $1
 `
 
@@ -254,12 +394,13 @@ func (q *Queries) GetChatMessage(ctx context.Context, id pgtype.UUID) (ChatMessa
 		&i.CreatedAt,
 		&i.FailureReason,
 		&i.ElapsedMs,
+		&i.MessageKind,
 	)
 	return i, err
 }
 
 const getChatSession = `-- name: GetChatSession :one
-SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, runtime_id, last_read_at, is_agent_intro, pinned_at FROM chat_session
+SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at FROM chat_session
 WHERE id = $1
 `
 
@@ -277,6 +418,7 @@ func (q *Queries) GetChatSession(ctx context.Context, id pgtype.UUID) (ChatSessi
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.UnreadSince,
 		&i.RuntimeID,
 		&i.LastReadAt,
 		&i.IsAgentIntro,
@@ -286,7 +428,7 @@ func (q *Queries) GetChatSession(ctx context.Context, id pgtype.UUID) (ChatSessi
 }
 
 const getChatSessionInWorkspace = `-- name: GetChatSessionInWorkspace :one
-SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, runtime_id, last_read_at, is_agent_intro, pinned_at FROM chat_session
+SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at FROM chat_session
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -309,6 +451,7 @@ func (q *Queries) GetChatSessionInWorkspace(ctx context.Context, arg GetChatSess
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.UnreadSince,
 		&i.RuntimeID,
 		&i.LastReadAt,
 		&i.IsAgentIntro,
@@ -324,7 +467,7 @@ WHERE chat_session_id = $1
     status = 'completed'
     OR (
       status = 'failed'
-      AND COALESCE(failure_reason, '') NOT IN ('iteration_limit', 'agent_fallback_message', 'api_invalid_request', 'codex_semantic_inactivity')
+      AND COALESCE(failure_reason, '') NOT IN ('iteration_limit', 'agent_fallback_message', 'api_invalid_request', 'codex_semantic_inactivity', 'agent_error.context_overflow')
       AND NOT (COALESCE(error, '') ILIKE '%400%' AND COALESCE(error, '') ILIKE '%invalid_request_error%')
     )
   )
@@ -345,7 +488,8 @@ type GetLastChatTaskSessionRow struct {
 // resume there than start over and lose conversation memory. Used as a
 // fallback when chat_session.session_id is NULL. Resume-unsafe failures are
 // excluded because replaying those sessions deterministically reproduces the
-// same terminal state.
+// same terminal state. Keep this list in sync with resumeUnsafeFailureReason
+// and GetLastTaskSession.
 func (q *Queries) GetLastChatTaskSession(ctx context.Context, chatSessionID pgtype.UUID) (GetLastChatTaskSessionRow, error) {
 	row := q.db.QueryRow(ctx, getLastChatTaskSession, chatSessionID)
 	var i GetLastChatTaskSessionRow
@@ -354,7 +498,7 @@ func (q *Queries) GetLastChatTaskSession(ctx context.Context, chatSessionID pgty
 }
 
 const getMostRecentUserChatMessage = `-- name: GetMostRecentUserChatMessage :one
-SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind FROM chat_message
 WHERE chat_session_id = $1 AND role = 'user'
 ORDER BY created_at DESC
 LIMIT 1
@@ -377,6 +521,7 @@ func (q *Queries) GetMostRecentUserChatMessage(ctx context.Context, chatSessionI
 		&i.CreatedAt,
 		&i.FailureReason,
 		&i.ElapsedMs,
+		&i.MessageKind,
 	)
 	return i, err
 }
@@ -458,18 +603,21 @@ func (q *Queries) LinkChatMessageToTask(ctx context.Context, arg LinkChatMessage
 }
 
 const listAllChatSessionsByCreator = `-- name: ListAllChatSessionsByCreator :many
-SELECT cs.id, cs.workspace_id, cs.agent_id, cs.creator_id, cs.title, cs.session_id, cs.work_dir, cs.status, cs.created_at, cs.updated_at, cs.runtime_id, cs.last_read_at, cs.is_agent_intro, cs.pinned_at,
-       (SELECT count(*) FROM chat_message m
-          WHERE m.chat_session_id = cs.id
-            AND m.role = 'assistant'
-            AND m.created_at > cs.last_read_at)::int AS unread_count,
+SELECT cs.id, cs.workspace_id, cs.agent_id, cs.creator_id, cs.title, cs.session_id, cs.work_dir, cs.status, cs.created_at, cs.updated_at, cs.unread_since, cs.runtime_id, cs.last_read_at, cs.is_agent_intro, cs.pinned_at,
+       CASE WHEN cs.status = 'archived' THEN 0
+            ELSE (SELECT count(*) FROM chat_message m
+                    WHERE m.chat_session_id = cs.id
+                      AND m.role = 'assistant'
+                      AND m.created_at > cs.last_read_at)
+       END::int AS unread_count,
        COALESCE(lm.content, '') AS last_message_content,
        COALESCE(lm.role, '') AS last_message_role,
        lm.created_at AS last_message_at,
-       lm.failure_reason AS last_message_failure_reason
+       lm.failure_reason AS last_message_failure_reason,
+       COALESCE(lm.message_kind, '') AS last_message_kind
 FROM chat_session cs
 LEFT JOIN LATERAL (
-  SELECT content, role, created_at, failure_reason
+  SELECT content, role, created_at, failure_reason, message_kind
     FROM chat_message m
    WHERE m.chat_session_id = cs.id
    ORDER BY m.created_at DESC
@@ -495,6 +643,7 @@ type ListAllChatSessionsByCreatorRow struct {
 	Status                   string             `json:"status"`
 	CreatedAt                pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                pgtype.Timestamptz `json:"updated_at"`
+	UnreadSince              pgtype.Timestamptz `json:"unread_since"`
 	RuntimeID                pgtype.UUID        `json:"runtime_id"`
 	LastReadAt               pgtype.Timestamptz `json:"last_read_at"`
 	IsAgentIntro             bool               `json:"is_agent_intro"`
@@ -504,8 +653,16 @@ type ListAllChatSessionsByCreatorRow struct {
 	LastMessageRole          string             `json:"last_message_role"`
 	LastMessageAt            pgtype.Timestamptz `json:"last_message_at"`
 	LastMessageFailureReason pgtype.Text        `json:"last_message_failure_reason"`
+	LastMessageKind          string             `json:"last_message_kind"`
 }
 
+// Unlike ListChatSessionsByCreator this returns archived sessions too (for the
+// "Archived" view), so unread must be forced to 0 for archived rows: archiving
+// deliberately does NOT advance last_read_at (so unarchive can restore the true
+// unread state), but an archived session is read-only and hidden from history,
+// so any residual unread is uncleanable and must not light up any badge. Gating
+// on status here is the single source of truth for all unread surfaces (FAB,
+// sidebar Chat tab, chat-window header) — see MUL-4360.
 func (q *Queries) ListAllChatSessionsByCreator(ctx context.Context, arg ListAllChatSessionsByCreatorParams) ([]ListAllChatSessionsByCreatorRow, error) {
 	rows, err := q.db.Query(ctx, listAllChatSessionsByCreator, arg.WorkspaceID, arg.CreatorID)
 	if err != nil {
@@ -526,6 +683,7 @@ func (q *Queries) ListAllChatSessionsByCreator(ctx context.Context, arg ListAllC
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.UnreadSince,
 			&i.RuntimeID,
 			&i.LastReadAt,
 			&i.IsAgentIntro,
@@ -535,6 +693,83 @@ func (q *Queries) ListAllChatSessionsByCreator(ctx context.Context, arg ListAllC
 			&i.LastMessageRole,
 			&i.LastMessageAt,
 			&i.LastMessageFailureReason,
+			&i.LastMessageKind,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listChatDraftRestoresBySession = `-- name: ListChatDraftRestoresBySession :many
+SELECT id, chat_session_id, task_id, content, attachment_ids, created_at FROM chat_draft_restore
+WHERE chat_session_id = $1
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListChatDraftRestoresBySession(ctx context.Context, chatSessionID pgtype.UUID) ([]ChatDraftRestore, error) {
+	rows, err := q.db.Query(ctx, listChatDraftRestoresBySession, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ChatDraftRestore{}
+	for rows.Next() {
+		var i ChatDraftRestore
+		if err := rows.Scan(
+			&i.ID,
+			&i.ChatSessionID,
+			&i.TaskID,
+			&i.Content,
+			&i.AttachmentIds,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listChatInputMessages = `-- name: ListChatInputMessages :many
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind FROM chat_message
+WHERE task_id = $1 AND role = 'user'
+ORDER BY created_at ASC, id ASC
+`
+
+// Loads the immutable user-message input batch owned by a direct-chat task.
+// The caller passes the task's chat_input_task_id (itself for an original send,
+// the root task for an auto-retry child), so a claim reads exactly the messages
+// the user sent for this turn — and never absorbs a message that arrived after
+// the batch was sealed, no matter what the assistant wrote or when. Only used
+// for new task-owned direct-chat tasks; legacy/channel (chat_input_task_id
+// NULL) tasks keep using ListChatMessages + trailingUserMessages.
+func (q *Queries) ListChatInputMessages(ctx context.Context, taskID pgtype.UUID) ([]ChatMessage, error) {
+	rows, err := q.db.Query(ctx, listChatInputMessages, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ChatMessage{}
+	for rows.Next() {
+		var i ChatMessage
+		if err := rows.Scan(
+			&i.ID,
+			&i.ChatSessionID,
+			&i.Role,
+			&i.Content,
+			&i.TaskID,
+			&i.CreatedAt,
+			&i.FailureReason,
+			&i.ElapsedMs,
+			&i.MessageKind,
 		); err != nil {
 			return nil, err
 		}
@@ -547,7 +782,7 @@ func (q *Queries) ListAllChatSessionsByCreator(ctx context.Context, arg ListAllC
 }
 
 const listChatMessages = `-- name: ListChatMessages :many
-SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind FROM chat_message
 WHERE chat_session_id = $1
 ORDER BY created_at ASC
 `
@@ -570,6 +805,7 @@ func (q *Queries) ListChatMessages(ctx context.Context, chatSessionID pgtype.UUI
 			&i.CreatedAt,
 			&i.FailureReason,
 			&i.ElapsedMs,
+			&i.MessageKind,
 		); err != nil {
 			return nil, err
 		}
@@ -582,7 +818,7 @@ func (q *Queries) ListChatMessages(ctx context.Context, chatSessionID pgtype.UUI
 }
 
 const listChatMessagesPage = `-- name: ListChatMessagesPage :many
-SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind FROM chat_message
 WHERE chat_session_id = $1
   AND (
     $3::timestamptz IS NULL
@@ -622,6 +858,7 @@ func (q *Queries) ListChatMessagesPage(ctx context.Context, arg ListChatMessages
 			&i.CreatedAt,
 			&i.FailureReason,
 			&i.ElapsedMs,
+			&i.MessageKind,
 		); err != nil {
 			return nil, err
 		}
@@ -634,7 +871,7 @@ func (q *Queries) ListChatMessagesPage(ctx context.Context, arg ListChatMessages
 }
 
 const listChatSessionsByCreator = `-- name: ListChatSessionsByCreator :many
-SELECT cs.id, cs.workspace_id, cs.agent_id, cs.creator_id, cs.title, cs.session_id, cs.work_dir, cs.status, cs.created_at, cs.updated_at, cs.runtime_id, cs.last_read_at, cs.is_agent_intro, cs.pinned_at,
+SELECT cs.id, cs.workspace_id, cs.agent_id, cs.creator_id, cs.title, cs.session_id, cs.work_dir, cs.status, cs.created_at, cs.updated_at, cs.unread_since, cs.runtime_id, cs.last_read_at, cs.is_agent_intro, cs.pinned_at,
        (SELECT count(*) FROM chat_message m
           WHERE m.chat_session_id = cs.id
             AND m.role = 'assistant'
@@ -642,10 +879,11 @@ SELECT cs.id, cs.workspace_id, cs.agent_id, cs.creator_id, cs.title, cs.session_
        COALESCE(lm.content, '') AS last_message_content,
        COALESCE(lm.role, '') AS last_message_role,
        lm.created_at AS last_message_at,
-       lm.failure_reason AS last_message_failure_reason
+       lm.failure_reason AS last_message_failure_reason,
+       COALESCE(lm.message_kind, '') AS last_message_kind
 FROM chat_session cs
 LEFT JOIN LATERAL (
-  SELECT content, role, created_at, failure_reason
+  SELECT content, role, created_at, failure_reason, message_kind
     FROM chat_message m
    WHERE m.chat_session_id = cs.id
    ORDER BY m.created_at DESC
@@ -671,6 +909,7 @@ type ListChatSessionsByCreatorRow struct {
 	Status                   string             `json:"status"`
 	CreatedAt                pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                pgtype.Timestamptz `json:"updated_at"`
+	UnreadSince              pgtype.Timestamptz `json:"unread_since"`
 	RuntimeID                pgtype.UUID        `json:"runtime_id"`
 	LastReadAt               pgtype.Timestamptz `json:"last_read_at"`
 	IsAgentIntro             bool               `json:"is_agent_intro"`
@@ -680,6 +919,7 @@ type ListChatSessionsByCreatorRow struct {
 	LastMessageRole          string             `json:"last_message_role"`
 	LastMessageAt            pgtype.Timestamptz `json:"last_message_at"`
 	LastMessageFailureReason pgtype.Text        `json:"last_message_failure_reason"`
+	LastMessageKind          string             `json:"last_message_kind"`
 }
 
 // IM-style list: each active session with its unread *count* (assistant
@@ -705,6 +945,7 @@ func (q *Queries) ListChatSessionsByCreator(ctx context.Context, arg ListChatSes
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.UnreadSince,
 			&i.RuntimeID,
 			&i.LastReadAt,
 			&i.IsAgentIntro,
@@ -714,6 +955,7 @@ func (q *Queries) ListChatSessionsByCreator(ctx context.Context, arg ListChatSes
 			&i.LastMessageRole,
 			&i.LastMessageAt,
 			&i.LastMessageFailureReason,
+			&i.LastMessageKind,
 		); err != nil {
 			return nil, err
 		}
@@ -804,6 +1046,133 @@ func (q *Queries) LockChatSessionForDelete(ctx context.Context, id pgtype.UUID) 
 	return id_2, err
 }
 
+const lockChatSessionForTask = `-- name: LockChatSessionForTask :one
+
+SELECT cs.id
+FROM agent_task_queue t
+JOIN chat_session cs ON cs.id = t.chat_session_id
+WHERE t.id = $1
+FOR UPDATE OF cs
+`
+
+// The chat_session row lock is the mutual-exclusion protocol between the
+// draft-restore writer (FinalizeDeferredCancelledChat) and every deleter of a
+// chat_session or one of its cascade parents. Without an FK, an INSERT into
+// chat_draft_restore takes no lock on its session, so a prune-then-delete would
+// otherwise miss a restore committed after its snapshot and strand it — with the
+// user's prompt in it — forever (#5219).
+//
+// The contract, held by all five paths below:
+//
+//	deleter:   lock the sessions FOR UPDATE -> prune restores -> delete the parent
+//	finalizer: lock the session FOR UPDATE  -> insert the restore
+//
+// Whoever locks first wins: a finalizer that got there first commits its row
+// before the deleter's prune statement takes its snapshot, so the prune sweeps
+// it; a deleter that got there first leaves no session for the finalizer to
+// lock, so it never inserts.
+//
+// Lock order is chat_session -> agent_task_queue everywhere (the finalizer locks
+// the session before claiming its task) so the deleters' cascade into
+// agent_task_queue cannot deadlock against it.
+//
+// The single-session delete path needs no new query: it already holds
+// LockChatSessionForDelete (same FOR UPDATE row lock) across its prune.
+// The finalizer's half of the protocol. No rows means the session is already
+// gone (its cascade NULLs agent_task_queue.chat_session_id), so there is nothing
+// to lock and nothing to restore into.
+func (q *Queries) LockChatSessionForTask(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockChatSessionForTask, id)
+	var id_2 pgtype.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
+const lockChatSessionsByArchivedRuntimeAgents = `-- name: LockChatSessionsByArchivedRuntimeAgents :many
+SELECT cs.id FROM chat_session cs
+JOIN agent a ON a.id = cs.agent_id
+WHERE a.runtime_id = $1 AND a.archived_at IS NOT NULL
+ORDER BY cs.id
+FOR UPDATE OF cs
+`
+
+func (q *Queries) LockChatSessionsByArchivedRuntimeAgents(ctx context.Context, runtimeID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, lockChatSessionsByArchivedRuntimeAgents, runtimeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockChatSessionsBySystemRuntimeAgents = `-- name: LockChatSessionsBySystemRuntimeAgents :many
+SELECT cs.id FROM chat_session cs
+JOIN agent a ON a.id = cs.agent_id
+WHERE a.runtime_id = $1 AND a.kind = 'system'
+ORDER BY cs.id
+FOR UPDATE OF cs
+`
+
+func (q *Queries) LockChatSessionsBySystemRuntimeAgents(ctx context.Context, runtimeID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, lockChatSessionsBySystemRuntimeAgents, runtimeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockChatSessionsByWorkspace = `-- name: LockChatSessionsByWorkspace :many
+SELECT id FROM chat_session
+WHERE workspace_id = $1
+ORDER BY id
+FOR UPDATE
+`
+
+// ORDER BY id: a stable lock order keeps two concurrent deleters from
+// deadlocking against each other.
+func (q *Queries) LockChatSessionsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, lockChatSessionsByWorkspace, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markChatSessionRead = `-- name: MarkChatSessionRead :exec
 UPDATE chat_session SET last_read_at = now()
 WHERE id = $1
@@ -820,7 +1189,7 @@ UPDATE chat_session
 SET status = CASE WHEN $2::bool THEN 'archived' ELSE 'active' END,
     updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, runtime_id, last_read_at, is_agent_intro, pinned_at
+RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at
 `
 
 type SetChatSessionArchivedParams struct {
@@ -846,6 +1215,7 @@ func (q *Queries) SetChatSessionArchived(ctx context.Context, arg SetChatSession
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.UnreadSince,
 		&i.RuntimeID,
 		&i.LastReadAt,
 		&i.IsAgentIntro,
@@ -858,7 +1228,7 @@ const setChatSessionPinned = `-- name: SetChatSessionPinned :one
 UPDATE chat_session
 SET pinned_at = CASE WHEN $2::bool THEN COALESCE(pinned_at, now()) ELSE NULL END
 WHERE id = $1
-RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, runtime_id, last_read_at, is_agent_intro, pinned_at
+RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at
 `
 
 type SetChatSessionPinnedParams struct {
@@ -885,10 +1255,79 @@ func (q *Queries) SetChatSessionPinned(ctx context.Context, arg SetChatSessionPi
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.UnreadSince,
 		&i.RuntimeID,
 		&i.LastReadAt,
 		&i.IsAgentIntro,
 		&i.PinnedAt,
+	)
+	return i, err
+}
+
+const setChatTaskInputOwnerSelf = `-- name: SetChatTaskInputOwnerSelf :one
+UPDATE agent_task_queue
+SET chat_input_task_id = id
+WHERE id = $1
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id
+`
+
+// Stamps a freshly-created direct-chat task as the owner of its own input batch
+// (chat_input_task_id = id), so a later claim loads exactly the user messages
+// tagged with this task id (ListChatInputMessages) rather than scanning trailing
+// history. Runs in the same transaction as CreateChatTask + the user message
+// insert on the direct-send path. Channel and legacy tasks skip this call and
+// keep chat_input_task_id NULL, so a rolling deploy never replays their history.
+func (q *Queries) SetChatTaskInputOwnerSelf(ctx context.Context, id pgtype.UUID) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, setChatTaskInputOwnerSelf, id)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
 	)
 	return i, err
 }
@@ -937,7 +1376,7 @@ func (q *Queries) UpdateChatSessionSession(ctx context.Context, arg UpdateChatSe
 const updateChatSessionTitle = `-- name: UpdateChatSessionTitle :one
 UPDATE chat_session SET title = $2, updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, runtime_id, last_read_at, is_agent_intro, pinned_at
+RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at
 `
 
 type UpdateChatSessionTitleParams struct {
@@ -959,6 +1398,7 @@ func (q *Queries) UpdateChatSessionTitle(ctx context.Context, arg UpdateChatSess
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.UnreadSince,
 		&i.RuntimeID,
 		&i.LastReadAt,
 		&i.IsAgentIntro,
@@ -970,7 +1410,7 @@ func (q *Queries) UpdateChatSessionTitle(ctx context.Context, arg UpdateChatSess
 const updateChatSessionTitleIfCurrent = `-- name: UpdateChatSessionTitleIfCurrent :one
 UPDATE chat_session SET title = $1, updated_at = now()
 WHERE id = $2 AND title = $3
-RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, runtime_id, last_read_at, is_agent_intro, pinned_at
+RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at
 `
 
 type UpdateChatSessionTitleIfCurrentParams struct {
@@ -1001,6 +1441,7 @@ func (q *Queries) UpdateChatSessionTitleIfCurrent(ctx context.Context, arg Updat
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.UnreadSince,
 		&i.RuntimeID,
 		&i.LastReadAt,
 		&i.IsAgentIntro,

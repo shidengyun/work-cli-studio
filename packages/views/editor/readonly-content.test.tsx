@@ -4,9 +4,28 @@ import type { ReactElement } from "react";
 import { readFileSync } from "node:fs";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-const { getAttachmentTextContentMock } = vi.hoisted(() => ({
-  getAttachmentTextContentMock: vi.fn(),
+const { getAttachmentTextContentMock, resolveIssueIdentifierMock } = vi.hoisted(
+  () => ({
+    getAttachmentTextContentMock: vi.fn(),
+    resolveIssueIdentifierMock: vi.fn(),
+  }),
+);
+
+vi.mock("../issues/hooks", () => ({
+  useResolveIssueIdentifier: (identifier: string) =>
+    resolveIssueIdentifierMock(identifier),
 }));
+
+// i18next is not initialized in this suite, so `t()` would resolve every label
+// to "". Resolve against the real EN bundle instead — the editor tree only ever
+// uses the `editor` namespace — so tests can select controls by accessible name.
+vi.mock("../i18n", async () => {
+  const editor = (await import("../locales/en/editor.json")).default;
+  return {
+    useT: () => ({ t: (select: (bundle: typeof editor) => string) => select(editor) }),
+    useTimeAgo: () => "just now",
+  };
+});
 
 vi.mock("@multica/core/api", () => ({
   api: { getAttachmentTextContent: getAttachmentTextContentMock },
@@ -221,6 +240,41 @@ describe("ReadonlyContent issue mention Markdown", () => {
     expect(getByTestId("issue-mention-card").textContent).toBe("MUL-123");
   });
 
+  it("autolinks a resolved bare identifier as an issue mention card", () => {
+    resolveIssueIdentifierMock.mockImplementation((id: string) =>
+      id === "MUL-7" ? { id: "issue-7", identifier: "MUL-7" } : null,
+    );
+
+    const { getByTestId } = render(
+      <ReadonlyContent content="See MUL-7 for context" />,
+    );
+
+    expect(getByTestId("issue-mention-card").textContent).toBe("MUL-7");
+    expect(resolveIssueIdentifierMock).toHaveBeenCalledWith("MUL-7");
+  });
+
+  it("leaves an unresolved bare identifier as plain text", () => {
+    resolveIssueIdentifierMock.mockReturnValue(null);
+
+    const { container, queryByTestId } = render(
+      <ReadonlyContent content="See MUL-999 for context" />,
+    );
+
+    expect(queryByTestId("issue-mention-card")).toBeNull();
+    expect(container.textContent).toContain("MUL-999");
+  });
+
+  it("does not autolink a bare identifier inside inline code", () => {
+    resolveIssueIdentifierMock.mockReturnValue(null);
+
+    const { queryByTestId } = render(
+      <ReadonlyContent content={"use `MUL-7` here"} />,
+    );
+
+    expect(resolveIssueIdentifierMock).not.toHaveBeenCalled();
+    expect(queryByTestId("issue-mention-card")).toBeNull();
+  });
+
   it("documents the CommonMark quoted-emphasis edge case before Korean particles", () => {
     const unsafe = render(
       <ReadonlyContent content={'**"무엇을 먼저 정해두고 시작할지"**가'} />,
@@ -267,13 +321,14 @@ describe("ReadonlyContent code styling", () => {
     expect(blockCode?.textContent).toBe(literalCode);
   });
 
-  it("renders code blocks without a language tag (lowlight highlightAuto fallback)", () => {
-    const token = "mul_407ec1e4464b580304362ed749f821901fd7d310";
+  it("renders code blocks without a language tag as plaintext", () => {
+    const token = "const answer = 42;";
     const { container } = render(
       <ReadonlyContent content={["```", token, "```"].join("\n")} />,
     );
     const blockCode = container.querySelector("pre code");
     expect(blockCode?.textContent?.trim()).toBe(token);
+    expect(blockCode?.querySelector("span")).toBeNull();
   });
 
   it("copies the whole fenced code block from the readonly toolbar", async () => {
@@ -362,37 +417,60 @@ describe("ReadonlyContent Mermaid rendering", () => {
     expect(container.querySelector("pre")).toBeNull();
   });
 
-  it("opens a fullscreen lightbox when the toolbar button is clicked", async () => {
+  it("opens the fullscreen viewer from the toolbar and closes it with Escape", async () => {
     const { container } = render(
       <ReadonlyContent
         content={["```mermaid", "graph LR", "  A[Start] --> B[Done]", "```"].join("\n")}
       />,
     );
 
-    const button = await waitFor(() => {
+    const expandButton = await waitFor(() => {
       const found = container.querySelector<HTMLButtonElement>(
-        ".mermaid-diagram-toolbar button",
+        '.mermaid-diagram-toolbar button[aria-label="Open diagram viewer"]',
       );
       expect(found).not.toBeNull();
       return found!;
     });
 
-    expect(document.querySelector(".mermaid-diagram-lightbox")).toBeNull();
+    expect(document.querySelector(".mermaid-viewer-canvas")).toBeNull();
 
-    fireEvent.click(button);
+    fireEvent.click(expandButton);
 
-    const lightboxFrame = document.querySelector<HTMLIFrameElement>(
-      ".mermaid-diagram-lightbox-frame",
-    );
-    expect(lightboxFrame).not.toBeNull();
-    expect(lightboxFrame?.getAttribute("sandbox")).toBe("");
-    expect(lightboxFrame?.srcdoc).toContain("mock diagram");
-    expect(lightboxFrame?.srcdoc).toContain("max-height: 100%");
+    const viewerFrame = await waitFor(() => {
+      const found = document.querySelector<HTMLIFrameElement>(".mermaid-viewer-frame");
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    expect(viewerFrame.getAttribute("sandbox")).toBe("");
+    expect(viewerFrame.srcdoc).toContain("mock diagram");
+    // The viewer draws at natural size and lets the host transform handle zoom;
+    // an inline-style max-width clamp here would cap how far it can scale.
+    expect(viewerFrame.srcdoc).toContain("width: 123px");
+    expect(viewerFrame.srcdoc).toContain("max-width: none");
 
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => {
-      expect(document.querySelector(".mermaid-diagram-lightbox")).toBeNull();
+      expect(document.querySelector(".mermaid-viewer-canvas")).toBeNull();
     });
+  });
+
+  it("keeps the inline toolbar outside the scroll container so wide diagrams stay openable", async () => {
+    const { container } = render(
+      <ReadonlyContent
+        content={["```mermaid", "graph LR", "  A[Start] --> B[Done]", "```"].join("\n")}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector(".mermaid-diagram-toolbar")).not.toBeNull();
+    });
+
+    // Previously the toolbar was an absolutely-positioned child of the
+    // horizontally-scrolling element, so on a wide diagram it scrolled out of
+    // view along with the content and left no way to open or copy it.
+    const scroller = container.querySelector(".mermaid-diagram-scroll");
+    expect(scroller).not.toBeNull();
+    expect(scroller?.querySelector(".mermaid-diagram-toolbar")).toBeNull();
   });
 
   it("shows the compact error state instead of embedding Mermaid's parser error SVG", async () => {

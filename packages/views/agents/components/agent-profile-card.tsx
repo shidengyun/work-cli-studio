@@ -6,6 +6,7 @@ import { useAgentPresenceDetail } from "@multica/core/agents";
 import { useWorkspaceId } from "@multica/core/hooks";
 import {
   deriveRuntimeHealth,
+  runtimeDisplayLabel,
   type RuntimeHealth,
 } from "@multica/core/runtimes";
 import { agentListOptions, memberListOptions } from "@multica/core/workspace/queries";
@@ -79,8 +80,7 @@ export function AgentProfileCard({ agentId }: AgentProfileCardProps) {
           initials={initials}
           avatarUrl={resolvePublicFileUrl(agent.avatar_url)}
           isAgent
-          size={40}
-          className="rounded-md"
+          size="xl"
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
@@ -175,11 +175,11 @@ function RuntimeRow({
     : runtime
       ? deriveRuntimeHealth(runtime, Date.now())
       : "offline";
-  const label =
-    runtime?.name ??
-    (isCloud
+  const label = runtime
+    ? runtimeDisplayLabel(runtime)
+    : isCloud
       ? t(($) => $.row.fallback_runtime_cloud)
-      : t(($) => $.profile_card.unknown_runtime));
+      : t(($) => $.profile_card.unknown_runtime);
   return (
     <div className="flex items-center gap-1.5">
       <span className="w-12 shrink-0 text-muted-foreground">{t(($) => $.profile_card.runtime_label)}</span>

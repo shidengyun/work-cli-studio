@@ -34,6 +34,7 @@ import {
   DropdownMenuItem,
 } from "@multica/ui/components/ui/dropdown-menu";
 import { ActorAvatar } from "../actor-avatar";
+import { AttributionBadge } from "../../issues/components/attribution-badge";
 import { api } from "@multica/core/api";
 import {
   useTranscriptViewStore,
@@ -265,6 +266,8 @@ export function AgentTranscriptDialog({
     () => (sortDirection === "newest_first" ? [...filteredItems].reverse() : filteredItems),
     [filteredItems, sortDirection],
   );
+  const isAntigravityLiveEmpty =
+    isLive && displayItems.length === 0 && runtimeInfo?.provider === "antigravity";
 
   const detailSeqs = useMemo(
     () => displayItems.filter(hasEventDetail).map((item) => item.seq),
@@ -489,7 +492,7 @@ export function AgentTranscriptDialog({
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <div className="flex min-w-0 items-center gap-2">
               {task.agent_id ? (
-                <ActorAvatar actorType="agent" actorId={task.agent_id} size={24} />
+                <ActorAvatar actorType="agent" actorId={task.agent_id} size="md" />
               ) : (
                 <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-info/10 text-info">
                   <Bot className="h-3.5 w-3.5" />
@@ -499,6 +502,9 @@ export function AgentTranscriptDialog({
             </div>
 
             {statusBadge}
+
+            {/* Accountable member (MUL-4302 §9): whose behalf this run is on. */}
+            <AttributionBadge attribution={task.attribution} className="shrink-0" />
 
             <div className="flex w-full max-w-full flex-wrap items-center justify-end gap-1 sm:ml-auto sm:w-auto">
               {detailSeqs.length > 0 && (
@@ -715,7 +721,12 @@ export function AgentTranscriptDialog({
         >
           {displayItems.length === 0 ? (
             <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
-              {isLive ? (
+              {isAntigravityLiveEmpty ? (
+                <div className="flex max-w-md items-center gap-2 px-4 text-center">
+                  <Clock className="h-4 w-4 shrink-0" />
+                  {t(($) => $.transcript.antigravity_live_unavailable)}
+                </div>
+              ) : isLive ? (
                 <div className="flex items-center gap-2">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   {t(($) => $.transcript.waiting_events)}

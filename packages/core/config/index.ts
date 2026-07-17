@@ -17,6 +17,10 @@ interface ConfigState {
   // the managed-cloud case.
   workspaceCreationDisabled: boolean;
   featureFlags: Record<string, boolean>;
+  // The running API build version, surfaced in the Help popover so
+  // self-hosted operators can confirm what's deployed. Empty for dev builds
+  // or servers older than this feature.
+  serverVersion: string;
   setCdnConfig: (config: { cdnDomain: string; cdnSigned?: boolean }) => void;
   setAuthConfig: (config: {
     allowSignup: boolean;
@@ -29,6 +33,7 @@ interface ConfigState {
     daemonAppUrl?: string;
   }) => void;
   setFeatureFlags: (flags?: Record<string, boolean>) => void;
+  setServerVersion: (version?: string) => void;
 }
 
 export const configStore = createStore<ConfigState>((set) => ({
@@ -41,6 +46,7 @@ export const configStore = createStore<ConfigState>((set) => ({
   verificationCodeViewerEnabled: false,
   workspaceCreationDisabled: false,
   featureFlags: {},
+  serverVersion: "",
   setCdnConfig: ({ cdnDomain, cdnSigned = false }) => set({ cdnDomain, cdnSigned }),
   setAuthConfig: ({
     allowSignup,
@@ -57,6 +63,7 @@ export const configStore = createStore<ConfigState>((set) => ({
   setDaemonConfig: ({ daemonServerUrl = "", daemonAppUrl = "" }) =>
     set({ daemonServerUrl, daemonAppUrl }),
   setFeatureFlags: (flags = {}) => set({ featureFlags: { ...flags } }),
+  setServerVersion: (version = "") => set({ serverVersion: version }),
 }));
 
 export function useConfigStore(): ConfigState;
