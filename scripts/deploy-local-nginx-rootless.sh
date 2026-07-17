@@ -233,6 +233,11 @@ http {
     access_log logs/access.log;
     sendfile on;
     keepalive_timeout 65;
+    client_body_temp_path ${NGINX_PREFIX}/client_body_temp;
+    proxy_temp_path ${NGINX_PREFIX}/proxy_temp;
+    fastcgi_temp_path ${NGINX_PREFIX}/fastcgi_temp;
+    uwsgi_temp_path ${NGINX_PREFIX}/uwsgi_temp;
+    scgi_temp_path ${NGINX_PREFIX}/scgi_temp;
 
     map \$http_upgrade \$connection_upgrade {
         default upgrade;
