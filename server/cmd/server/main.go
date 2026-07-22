@@ -396,7 +396,11 @@ func main() {
 		FeatureFlags:       flags,
 		HeartbeatScheduler: heartbeatScheduler,
 	})
-	registerNotificationListeners(bus, queries, h.EmailService)
+	weComSvc := service.NewWeComServiceFromEnv()
+	registerNotificationListeners(bus, queries, notificationListenerServices{
+		Email: h.EmailService,
+		WeCom: weComSvc,
+	})
 
 	srv := &http.Server{
 		Addr:    ":" + port,

@@ -60,11 +60,16 @@ func priorityLabel(p string) string {
 
 var emptyDetails = []byte("{}")
 
-func taskStatusEmailService(emailServices []*service.EmailService) *service.EmailService {
-	if len(emailServices) == 0 {
-		return nil
+type notificationListenerServices struct {
+	Email *service.EmailService
+	WeCom *service.WeComService
+}
+
+func notificationServices(configs []notificationListenerServices) notificationListenerServices {
+	if len(configs) == 0 {
+		return notificationListenerServices{}
 	}
-	return emailServices[0]
+	return configs[0]
 }
 
 func frontendOriginForEmail() string {
@@ -202,6 +207,32 @@ func sendTaskStatusEmails(
 			slog.Error("task status email: send failed",
 				"to", row.Email, "issue_id", util.UUIDToString(issue.ID), "type", notifType, "error", err)
 		}
+	}
+}
+
+func sendTaskStatusWeCom(
+	ctx context.Context,
+	weComSvc *service.WeComService,
+	workspace db.Workspace,
+	issue db.Issue,
+	status string,
+	errorText string,
+	resultText string,
+) {
+	if weComSvc == nil {
+		return
+	}
+
+	if err := weComSvc.SendTaskStatusText(ctx, service.TaskStatusEmail{
+		WorkspaceName: workspace.Name,
+		IssueTitle:    issue.Title,
+		IssueURL:      issueEmailURL(workspace, issue),
+		Status:        status,
+		Error:         errorText,
+		Result:        resultText,
+	}); err != nil {
+		slog.Error("task status wecom: send failed",
+			"issue_id", util.UUIDToString(issue.ID), "status", status, "error", err)
 	}
 }
 
@@ -690,9 +721,9 @@ func notifyMentionedMembers(
 // NOTE: uses context.Background() because the event bus dispatches synchronously
 // within the HTTP request goroutine. Adding per-handler timeouts is a bus-level
 // concern — see events.Bus for future improvements.
-func registerNotificationListeners(bus *events.Bus, queries *db.Queries, emailServices ...*service.EmailService) {
+func registerNotificationListeners(bus *events.Bus, queries *db.Queries, configs ...notificationListenerServices) {
 	ctx := context.Background()
-	emailSvc := taskStatusEmailService(emailServices)
+	services := notificationServices(configs)
 
 	// issue:created — Direct notification to assignee if assignee != actor
 	bus.Subscribe(protocol.EventIssueCreated, func(e events.Event) {
@@ -1055,9 +1086,11 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries, emailSe
 			return
 		}
 
-		sendTaskStatusEmails(ctx, queries, emailSvc, e, workspace, issue,
-			"task_completed", taskStatusFromEventType(e.Type), "",
-			completedTaskResultText(ctx, queries, payload))
+		resultText := completedTaskResultText(ctx, queries, payload)
+		status := taskStatusFromEventType(e.Type)
+		sendTaskStatusEmails(ctx, queries, services.Email, e, workspace, issue,
+			"task_completed", status, "", resultText)
+		sendTaskStatusWeCom(ctx, services.WeCom, workspace, issue, status, "", resultText)
 	})
 
 	// task:failed — notify all subscribers except the agent
@@ -1082,7 +1115,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries, emailSe
 			slog.Error("task:failed email: failed to get workspace",
 				"workspace_id", e.WorkspaceID, "issue_id", issueID, "error", err)
 		} else {
-			sendTaskStatusEmails(ctx, queries, emailSvc, e, workspace, issue,
+			sendTaskStatusEmails(ctx, queries, services.Email, e, workspace, issue,
 				"task_failed", taskStatusFromEventType(e.Type), taskFailureText(payload), "")
 		}
 

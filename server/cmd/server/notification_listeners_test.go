@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -103,6 +107,67 @@ func TestTaskResultTextFromTaskResult_FallbackResultField(t *testing.T) {
 	got := taskResultTextFromTaskResult(raw)
 	if got != "Finished customer import" {
 		t.Fatalf("taskResultTextFromTaskResult() = %q", got)
+	}
+}
+
+func TestNotification_TaskCompleted_SendsWeCom(t *testing.T) {
+	queries := db.New(testPool)
+
+	contentCh := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			MsgType string `json:"msgtype"`
+			Text    struct {
+				Content string `json:"content"`
+			} `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if payload.MsgType != "text" {
+			t.Errorf("msgtype = %q, want text", payload.MsgType)
+		}
+		contentCh <- payload.Text.Content
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+
+	bus := events.New()
+	registerNotificationListeners(bus, queries, notificationListenerServices{
+		WeCom: service.NewWeComService(server.URL, server.Client()),
+	})
+
+	issueID := createTestIssue(t, testWorkspaceID, testUserID)
+	t.Cleanup(func() { cleanupTestIssue(t, issueID) })
+	if _, err := testPool.Exec(context.Background(), `UPDATE issue SET title = $1 WHERE id = $2`, "wecom completion issue", issueID); err != nil {
+		t.Fatalf("update issue title: %v", err)
+	}
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventTaskCompleted,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "agent",
+		ActorID:     "00000000-0000-0000-0000-000000000001",
+		Payload: map[string]any{
+			"issue_id": issueID,
+			"output":   "Finished from event payload",
+		},
+	})
+
+	select {
+	case content := <-contentCh:
+		for _, want := range []string{
+			"Multica task completed",
+			"wecom completion issue",
+			"Finished from event payload",
+		} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("wecom content missing %q:\n%s", want, content)
+			}
+		}
+	default:
+		t.Fatal("expected WeCom webhook request")
 	}
 }
 
