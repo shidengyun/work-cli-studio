@@ -128,6 +128,19 @@ describe("LoginPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("uses initialEmail when provided", () => {
+    renderWithI18n(
+      <LoginPage
+        onSuccess={onSuccess}
+        initialEmail="shidengyun@yeah.net"
+      />,
+    );
+
+    expect(screen.getByLabelText(/email/i)).toHaveValue(
+      "shidengyun@yeah.net",
+    );
+  });
+
   // -------------------------------------------------------------------------
   // Email validation
   // -------------------------------------------------------------------------
@@ -196,6 +209,38 @@ describe("LoginPage", () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByText(/test@example.com/)).toBeInTheDocument();
+  });
+
+  it("prefills the verification code after sending when a resolver is configured", async () => {
+    mockSendCode.mockResolvedValueOnce(undefined);
+    mockVerifyCode.mockResolvedValueOnce(undefined);
+    mockApiListWorkspaces.mockResolvedValueOnce([{ id: "ws-1" }]);
+    const resolveVerificationCodeAfterSend = vi
+      .fn()
+      .mockResolvedValueOnce("654321");
+    renderWithI18n(
+      <LoginPage
+        onSuccess={onSuccess}
+        resolveVerificationCodeAfterSend={resolveVerificationCodeAfterSend}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/email/i), "test@example.com");
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    await waitFor(() => {
+      expect(getOTPInput()).toHaveValue("654321");
+    });
+    expect(resolveVerificationCodeAfterSend).toHaveBeenCalledWith(
+      "test@example.com",
+    );
+    await waitFor(() => {
+      expect(mockVerifyCode).toHaveBeenCalledWith(
+        "test@example.com",
+        "654321",
+      );
+    });
   });
 
   it("autofocuses the OTP input when the code step opens", async () => {

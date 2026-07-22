@@ -54,6 +54,10 @@ interface LoginPageProps {
   cliCallback?: CliCallbackConfig;
   /** Called after a token is obtained (e.g. to set cookies). */
   onTokenObtained?: () => void;
+  /** Initial email value shown in the sign-in form. */
+  initialEmail?: string;
+  /** Optional hook for private/local flows that can read the sent code. */
+  resolveVerificationCodeAfterSend?: (email: string) => Promise<string | null | undefined>;
   /** Override Google login handler (e.g. desktop opens browser externally). When provided, renders the Google button even if `google` config is omitted. */
   onGoogleLogin?: () => void;
   /** Slot rendered at the bottom of the sign-in card, below the
@@ -103,13 +107,15 @@ export function LoginPage({
   google,
   cliCallback,
   onTokenObtained,
+  initialEmail = "",
+  resolveVerificationCodeAfterSend,
   onGoogleLogin,
   extra,
 }: LoginPageProps) {
   const { t } = useT("auth");
   const qc = useQueryClient();
   const [step, setStep] = useState<"email" | "code" | "cli_confirm">("email");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(initialEmail);
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -118,6 +124,19 @@ export function LoginPage({
   // Tracks how the existing session was detected so handleCliAuthorize
   // uses the matching token source (cookie → issueCliToken, localStorage → direct).
   const authSourceRef = useRef<"cookie" | "localStorage">("cookie");
+
+  const getSentVerificationCode = useCallback(
+    async (targetEmail: string) => {
+      if (!resolveVerificationCodeAfterSend) return "";
+      try {
+        const sentCode = await resolveVerificationCodeAfterSend(targetEmail);
+        return sentCode?.trim() ?? "";
+      } catch {
+        return "";
+      }
+    },
+    [resolveVerificationCodeAfterSend],
+  );
 
   // Check for existing session when CLI callback is present.
   // Prioritises cookie auth (= current browser session) to avoid authorising
@@ -173,8 +192,9 @@ export function LoginPage({
       setError("");
       try {
         await useAuthStore.getState().sendCode(email);
+        const sentCode = await getSentVerificationCode(email);
         setStep("code");
-        setCode("");
+        setCode(sentCode);
         setCooldown(60);
       } catch (err) {
         setError(
@@ -186,7 +206,7 @@ export function LoginPage({
         setLoading(false);
       }
     },
-    [email, t],
+    [email, getSentVerificationCode, t],
   );
 
   const handleVerify = useCallback(
@@ -227,11 +247,17 @@ export function LoginPage({
     [email, onSuccess, cliCallback, onTokenObtained, qc, t],
   );
 
+  useEffect(() => {
+    if (step !== "code" || loading || code.length !== 6) return;
+    void handleVerify(code);
+  }, [code, handleVerify, loading, step]);
+
   const handleResend = async () => {
     if (cooldown > 0) return;
     setError("");
     try {
       await useAuthStore.getState().sendCode(email);
+      setCode(await getSentVerificationCode(email));
       setCooldown(60);
     } catch (err) {
       setError(
@@ -354,7 +380,6 @@ export function LoginPage({
               value={code}
               onChange={(value) => {
                 setCode(value);
-                if (value.length === 6) handleVerify(value);
               }}
               disabled={loading}
             >

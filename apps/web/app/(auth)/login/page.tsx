@@ -30,6 +30,20 @@ import Link from "next/link";
 import { LoginPage, validateCliCallback } from "@multica/views/auth";
 import { useT } from "@multica/views/i18n";
 
+const DEFAULT_LOGIN_EMAIL = "shidengyun@yeah.net";
+
+async function resolveLatestVerificationCode(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  const { codes } = await api.listVerificationCodes(20);
+  return (
+    codes.find(
+      (code) =>
+        code.email.trim().toLowerCase() === normalizedEmail &&
+        code.used !== true,
+    )?.code ?? ""
+  );
+}
+
 /**
  * Pick where a logged-in user with no explicit `?next=` should land.
  * Un-onboarded users with pending invitations on their email get routed to
@@ -233,6 +247,10 @@ function LoginPageContent() {
           : undefined
       }
       onTokenObtained={setLoggedInCookie}
+      initialEmail={user ? undefined : DEFAULT_LOGIN_EMAIL}
+      resolveVerificationCodeAfterSend={
+        user ? undefined : resolveLatestVerificationCode
+      }
       extra={
         <span className="text-xs text-muted-foreground">
           {t(($) => $.web.prefer_desktop)}{" "}

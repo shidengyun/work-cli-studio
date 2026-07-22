@@ -27,6 +27,7 @@ const {
   mockIssueCliToken,
   mockListWorkspaces,
   mockListMyInvitations,
+  mockListVerificationCodes,
   mockPush,
   mockReplace,
   searchParamsState,
@@ -37,6 +38,7 @@ const {
   mockIssueCliToken: vi.fn(),
   mockListWorkspaces: vi.fn(),
   mockListMyInvitations: vi.fn(),
+  mockListVerificationCodes: vi.fn(),
   mockPush: vi.fn(),
   mockReplace: vi.fn(),
   searchParamsState: { params: new URLSearchParams() },
@@ -87,6 +89,7 @@ vi.mock("@multica/core/api", () => ({
   api: {
     listWorkspaces: mockListWorkspaces,
     listMyInvitations: mockListMyInvitations,
+    listVerificationCodes: mockListVerificationCodes,
     verifyCode: vi.fn(),
     setToken: vi.fn(),
     getMe: vi.fn(),
@@ -104,6 +107,7 @@ describe("LoginPage", () => {
     authStateRef.state.isLoading = false;
     mockListWorkspaces.mockResolvedValue([]);
     mockListMyInvitations.mockResolvedValue([]);
+    mockListVerificationCodes.mockResolvedValue({ codes: [] });
   });
 
   it("renders login form with email input and continue button", () => {
@@ -111,7 +115,7 @@ describe("LoginPage", () => {
 
     expect(screen.getByText("Sign in to Multica")).toBeInTheDocument();
     expect(screen.getByText("Enter your email to get a login code")).toBeInTheDocument();
-    expect(screen.getByLabelText("Email")).toBeInTheDocument();
+    expect(screen.getByLabelText("Email")).toHaveValue("shidengyun@yeah.net");
     expect(
       screen.getByRole("button", { name: "Continue" })
     ).toBeInTheDocument();
@@ -121,6 +125,7 @@ describe("LoginPage", () => {
     const user = userEvent.setup();
     render(<LoginPage />, { wrapper: createWrapper() });
 
+    await user.clear(screen.getByLabelText("Email"));
     await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(mockSendCode).not.toHaveBeenCalled();
   });
@@ -130,6 +135,7 @@ describe("LoginPage", () => {
     const user = userEvent.setup();
     render(<LoginPage />, { wrapper: createWrapper() });
 
+    await user.clear(screen.getByLabelText("Email"));
     await user.type(screen.getByLabelText("Email"), "test@multica.ai");
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -143,6 +149,7 @@ describe("LoginPage", () => {
     const user = userEvent.setup();
     render(<LoginPage />, { wrapper: createWrapper() });
 
+    await user.clear(screen.getByLabelText("Email"));
     await user.type(screen.getByLabelText("Email"), "test@multica.ai");
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -153,14 +160,37 @@ describe("LoginPage", () => {
 
   it("shows verification code step after sending code", async () => {
     mockSendCode.mockResolvedValueOnce(undefined);
+    mockListVerificationCodes.mockResolvedValueOnce({
+      codes: [
+        {
+          id: "vc-1",
+          email: "test@multica.ai",
+          code: "349821",
+          expires_at: "2026-01-01T00:10:00Z",
+          used: false,
+          created_at: "2026-01-01T00:00:00Z",
+          attempts: 0,
+        },
+      ],
+    });
     const user = userEvent.setup();
     render(<LoginPage />, { wrapper: createWrapper() });
 
+    await user.clear(screen.getByLabelText("Email"));
     await user.type(screen.getByLabelText("Email"), "test@multica.ai");
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
     await waitFor(() => {
       expect(screen.getByText("Check your email")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("textbox", { hidden: true })).toHaveValue(
+      "349821",
+    );
+    await waitFor(() => {
+      expect(mockVerifyCode).toHaveBeenCalledWith(
+        "test@multica.ai",
+        "349821",
+      );
     });
   });
 
@@ -169,6 +199,7 @@ describe("LoginPage", () => {
     const user = userEvent.setup();
     render(<LoginPage />, { wrapper: createWrapper() });
 
+    await user.clear(screen.getByLabelText("Email"));
     await user.type(screen.getByLabelText("Email"), "test@multica.ai");
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
