@@ -322,7 +322,7 @@ export function LoginPage({
         <Card className="w-full max-w-sm">
           <CardHeader className="text-center">
             {logo && <div className="mx-auto mb-4">{logo}</div>}
-            <CardTitle className="text-2xl">
+            <CardTitle className="text-display-sm">
               {t(($) => $.cli.title)}
             </CardTitle>
             <CardDescription>
@@ -366,7 +366,7 @@ export function LoginPage({
         <Card className="w-full max-w-sm">
           <CardHeader className="text-center">
             {logo && <div className="mx-auto mb-4">{logo}</div>}
-            <CardTitle className="text-2xl">
+            <CardTitle className="text-display-sm">
               {t(($) => $.verify.title)}
             </CardTitle>
             <CardDescription>
@@ -393,9 +393,9 @@ export function LoginPage({
               </InputOTPGroup>
             </InputOTP>
             {error && (
-              <p className="text-sm text-destructive">{error}</p>
+              <p className="text-body text-destructive">{error}</p>
             )}
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <div className="flex items-center gap-2 text-body text-muted-foreground">
               <button
                 type="button"
                 onClick={handleResend}
@@ -436,7 +436,7 @@ export function LoginPage({
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center">
           {logo && <div className="mx-auto mb-4">{logo}</div>}
-          <CardTitle className="text-2xl">
+          <CardTitle className="text-display-sm">
             {t(($) => $.signin.title)}
           </CardTitle>
           <CardDescription>
@@ -458,7 +458,7 @@ export function LoginPage({
               />
             </div>
             {error && (
-              <p className="text-sm text-destructive">{error}</p>
+              <p className="text-body text-destructive">{error}</p>
             )}
           </form>
         </CardContent>
