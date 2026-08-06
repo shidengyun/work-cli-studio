@@ -907,6 +907,183 @@ func (q *Queries) CancelDeferredEscalationsForTask(ctx context.Context, escalati
 	return items, nil
 }
 
+const cancelQueuedAgentTask = `-- name: CancelQueuedAgentTask :one
+UPDATE agent_task_queue
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+WHERE id = $1
+  AND chat_session_id = $2
+  AND status = 'queued'
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for
+`
+
+type CancelQueuedAgentTaskParams struct {
+	ID            pgtype.UUID `json:"id"`
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+}
+
+// Queue editing is a compare-and-set: never cancel a task that the daemon
+// promoted between the user's click and this statement.
+func (q *Queries) CancelQueuedAgentTask(ctx context.Context, arg CancelQueuedAgentTaskParams) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, cancelQueuedAgentTask, arg.ID, arg.ChatSessionID)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+	)
+	return i, err
+}
+
+const cancelQueuedAgentTasksForSession = `-- name: CancelQueuedAgentTasksForSession :many
+WITH head AS MATERIALIZED (
+  SELECT candidate.id
+  FROM agent_task_queue AS candidate
+  WHERE candidate.chat_session_id = $1
+    AND candidate.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+    AND candidate.regenerate_quick_actions_for IS NULL
+  ORDER BY
+    CASE
+      WHEN candidate.status IN ('dispatched', 'running', 'waiting_local_directory') THEN 0
+      WHEN candidate.status = 'deferred' THEN 1
+      ELSE 2
+    END,
+    candidate.priority DESC,
+    candidate.created_at ASC,
+    candidate.id ASC
+  LIMIT 1
+)
+UPDATE agent_task_queue AS queued
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+WHERE queued.chat_session_id = $1
+  AND queued.status = 'queued'
+  AND queued.id IS DISTINCT FROM (SELECT id FROM head)
+RETURNING queued.id, queued.agent_id, queued.issue_id, queued.status, queued.priority, queued.dispatched_at, queued.started_at, queued.completed_at, queued.result, queued.error, queued.created_at, queued.context, queued.runtime_id, queued.session_id, queued.work_dir, queued.trigger_comment_id, queued.chat_session_id, queued.autopilot_run_id, queued.attempt, queued.max_attempts, queued.parent_task_id, queued.failure_reason, queued.trigger_summary, queued.force_fresh_session, queued.is_leader_task, queued.wait_reason, queued.initiator_user_id, queued.handoff_note, queued.prepare_lease_expires_at, queued.squad_id, queued.runtime_mcp_overlay, queued.escalation_for_task_id, queued.fire_at, queued.originator_user_id, queued.runtime_connected_apps, queued.coalesced_comment_ids, queued.delivered_comment_ids, queued.chat_input_task_id, queued.chat_finalize_deferred_at, queued.originator_source, queued.delegated_from_task_id, queued.retry_of_task_id, queued.rerun_of_task_id, queued.rule_version_id, queued.trigger_evidence_kind, queued.trigger_evidence_ref_id, queued.accountable_user_id, queued.session_rollout_missing, queued.retired_session_id, queued.quick_actions_disabled, queued.regenerate_quick_actions_for
+`
+
+// Clear only positional follow-ups. The first visible task is current even
+// when it has not been claimed yet, so an all-queued session must preserve its
+// priority/FIFO head. Keep this selector in lockstep with the visible-head
+// invariant documented above ListChatMessages in chat.sql.
+func (q *Queries) CancelQueuedAgentTasksForSession(ctx context.Context, chatSessionID pgtype.UUID) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, cancelQueuedAgentTasksForSession, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentTaskQueue{}
+	for rows.Next() {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+			&i.IsLeaderTask,
+			&i.WaitReason,
+			&i.InitiatorUserID,
+			&i.HandoffNote,
+			&i.PrepareLeaseExpiresAt,
+			&i.SquadID,
+			&i.RuntimeMcpOverlay,
+			&i.EscalationForTaskID,
+			&i.FireAt,
+			&i.OriginatorUserID,
+			&i.RuntimeConnectedApps,
+			&i.CoalescedCommentIds,
+			&i.DeliveredCommentIds,
+			&i.ChatInputTaskID,
+			&i.ChatFinalizeDeferredAt,
+			&i.OriginatorSource,
+			&i.DelegatedFromTaskID,
+			&i.RetryOfTaskID,
+			&i.RerunOfTaskID,
+			&i.RuleVersionID,
+			&i.TriggerEvidenceKind,
+			&i.TriggerEvidenceRefID,
+			&i.AccountableUserID,
+			&i.SessionRolloutMissing,
+			&i.RetiredSessionID,
+			&i.QuickActionsDisabled,
+			&i.RegenerateQuickActionsFor,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const claimAgentTask = `-- name: ClaimAgentTask :one
 UPDATE agent_task_queue
 SET status = 'dispatched',
@@ -932,7 +1109,7 @@ WHERE id = (
               )
             )
       )
-    ORDER BY atq.priority DESC, atq.created_at ASC
+    ORDER BY atq.priority DESC, atq.created_at ASC, atq.id ASC
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
@@ -1755,6 +1932,153 @@ func (q *Queries) CreateDeferredAgentTask(ctx context.Context, arg CreateDeferre
 		arg.DelegatedFromTaskID,
 		arg.TriggerEvidenceKind,
 		arg.TriggerEvidenceRefID,
+	)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+	)
+	return i, err
+}
+
+const createDeferredChannelIssueTask = `-- name: CreateDeferredChannelIssueTask :one
+INSERT INTO agent_task_queue (
+    agent_id, runtime_id, issue_id, status, priority, trigger_comment_id,
+    coalesced_comment_ids, trigger_summary, force_fresh_session, is_leader_task, handoff_note,
+    squad_id, context, originator_user_id, accountable_user_id, runtime_mcp_overlay, runtime_connected_apps,
+    originator_source, delegated_from_task_id, rule_version_id, rerun_of_task_id,
+    trigger_evidence_kind, trigger_evidence_ref_id, fire_at
+)
+VALUES (
+    $1, $2, $3, 'deferred', $4, $5,
+    COALESCE($6::uuid[], '{}'),
+    $7,
+    COALESCE($8::boolean, FALSE),
+    COALESCE($9::boolean, FALSE),
+    $10,
+    $11,
+    jsonb_strip_nulls(jsonb_build_object(
+        'head_sha', NULLIF(COALESCE($12::text, ''), ''),
+        'channel_issue_media_pending', TRUE
+    )),
+    $13,
+    $14,
+    $15,
+    $16,
+    $17,
+    $18,
+    $19,
+    $20,
+    $21,
+    $22,
+    $23
+)
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for
+`
+
+type CreateDeferredChannelIssueTaskParams struct {
+	AgentID              pgtype.UUID        `json:"agent_id"`
+	RuntimeID            pgtype.UUID        `json:"runtime_id"`
+	IssueID              pgtype.UUID        `json:"issue_id"`
+	Priority             int32              `json:"priority"`
+	TriggerCommentID     pgtype.UUID        `json:"trigger_comment_id"`
+	CoalescedCommentIds  []pgtype.UUID      `json:"coalesced_comment_ids"`
+	TriggerSummary       pgtype.Text        `json:"trigger_summary"`
+	ForceFreshSession    pgtype.Bool        `json:"force_fresh_session"`
+	IsLeaderTask         pgtype.Bool        `json:"is_leader_task"`
+	HandoffNote          pgtype.Text        `json:"handoff_note"`
+	SquadID              pgtype.UUID        `json:"squad_id"`
+	HeadSha              pgtype.Text        `json:"head_sha"`
+	OriginatorUserID     pgtype.UUID        `json:"originator_user_id"`
+	AccountableUserID    pgtype.UUID        `json:"accountable_user_id"`
+	RuntimeMcpOverlay    []byte             `json:"runtime_mcp_overlay"`
+	RuntimeConnectedApps []byte             `json:"runtime_connected_apps"`
+	OriginatorSource     pgtype.Text        `json:"originator_source"`
+	DelegatedFromTaskID  pgtype.UUID        `json:"delegated_from_task_id"`
+	RuleVersionID        pgtype.UUID        `json:"rule_version_id"`
+	RerunOfTaskID        pgtype.UUID        `json:"rerun_of_task_id"`
+	TriggerEvidenceKind  pgtype.Text        `json:"trigger_evidence_kind"`
+	TriggerEvidenceRefID pgtype.UUID        `json:"trigger_evidence_ref_id"`
+	FireAt               pgtype.Timestamptz `json:"fire_at"`
+}
+
+// Channel /issue media resolves after issue creation. Persist the assigned
+// issue task up front for crash safety, but keep it inert until attachment
+// binding settles or the fire_at fallback is promoted by the normal sweeper.
+func (q *Queries) CreateDeferredChannelIssueTask(ctx context.Context, arg CreateDeferredChannelIssueTaskParams) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, createDeferredChannelIssueTask,
+		arg.AgentID,
+		arg.RuntimeID,
+		arg.IssueID,
+		arg.Priority,
+		arg.TriggerCommentID,
+		arg.CoalescedCommentIds,
+		arg.TriggerSummary,
+		arg.ForceFreshSession,
+		arg.IsLeaderTask,
+		arg.HandoffNote,
+		arg.SquadID,
+		arg.HeadSha,
+		arg.OriginatorUserID,
+		arg.AccountableUserID,
+		arg.RuntimeMcpOverlay,
+		arg.RuntimeConnectedApps,
+		arg.OriginatorSource,
+		arg.DelegatedFromTaskID,
+		arg.RuleVersionID,
+		arg.RerunOfTaskID,
+		arg.TriggerEvidenceKind,
+		arg.TriggerEvidenceRefID,
+		arg.FireAt,
 	)
 	var i AgentTaskQueue
 	err := row.Scan(
@@ -2861,6 +3185,15 @@ WITH retired_sessions AS (
     FROM agent_task_queue r
     WHERE r.agent_id = $1 AND r.issue_id = $2
       AND r.retired_session_id IS NOT NULL
+), resume_overflow_at AS (
+    SELECT MAX(COALESCE(t.completed_at, t.started_at, t.dispatched_at, t.created_at)) AS at
+    FROM agent_task_queue t
+    WHERE t.agent_id = $1 AND t.issue_id = $2
+      AND t.status = 'failed'
+      AND (
+        COALESCE(t.failure_reason, '') = 'codex_resume_oversized'
+        OR (COALESCE(t.error, '') ILIKE '%thread/resume failed%' AND COALESCE(t.error, '') ILIKE '%token too long%')
+      )
 ), latest_per_session AS (
     SELECT DISTINCT ON (t.session_id)
         t.session_id, t.work_dir, t.runtime_id, t.status, t.failure_reason, t.error,
@@ -2868,21 +3201,32 @@ WITH retired_sessions AS (
     FROM agent_task_queue t
     WHERE t.agent_id = $1 AND t.issue_id = $2
       AND t.session_id IS NOT NULL
-      AND t.status IN ('completed', 'failed')
+      AND t.status IN ('completed', 'failed', 'cancelled')
     ORDER BY t.session_id, COALESCE(t.completed_at, t.started_at, t.dispatched_at, t.created_at) DESC
 )
 SELECT session_id, work_dir, runtime_id FROM latest_per_session
 WHERE session_id NOT IN (SELECT session_id FROM retired_sessions)
   AND (
-    status = 'completed'
+    status IN ('completed', 'cancelled')
     OR (
       status = 'failed'
-      AND COALESCE(failure_reason, '') NOT IN ('iteration_limit', 'agent_fallback_message', 'api_invalid_request', 'codex_semantic_inactivity', 'agent_error.context_overflow')
+      AND COALESCE(failure_reason, '') NOT IN ('iteration_limit', 'agent_fallback_message', 'api_invalid_request', 'codex_semantic_inactivity', 'agent_error.context_overflow', 'codex_resume_oversized')
       AND NOT (COALESCE(error, '') ILIKE '%400%' AND COALESCE(error, '') ILIKE '%invalid_request_error%')
       AND NOT (COALESCE(error, '') ILIKE '%image dimensions exceed max allowed size%' AND COALESCE(error, '') ILIKE '%image.source.base64.data%')
       AND NOT (COALESCE(error, '') ~* 'must not be empty|must be non-?empty|must have non-?empty|non-?empty content|cannot be empty|should not be empty'
                AND COALESCE(error, '') ~* 'role[^a-z0-9]{0,2}assistant|assistant message|message at position|messages\.[0-9]|messages\[[0-9]')
     )
+  )
+  -- MUL-5722: a resume that overflowed the reader names no session, so it can
+  -- only be excluded by time, not by matching the failed row. Drop every
+  -- session whose last terminal activity predates the newest such failure: one
+  -- of them IS the oversized thread, and the row that would tell us which is
+  -- exactly the row that could not be written. Anything that terminated after
+  -- the overflow is the fresh thread that replaced it, so this un-blocks itself
+  -- as soon as one succeeds.
+  AND (
+    (SELECT at FROM resume_overflow_at) IS NULL
+    OR terminal_at > (SELECT at FROM resume_overflow_at)
   )
 ORDER BY terminal_at DESC
 LIMIT 1
@@ -2901,13 +3245,21 @@ type GetLastTaskSessionRow struct {
 
 // Returns the session_id and work_dir from the most recent task for a given
 // (agent_id, issue_id) pair, used for session resumption on the auto-retry
-// path. We accept both 'completed' and 'failed' tasks: a failed task may
-// have established a real agent session before crashing (orphaned by a
+// path. We accept 'completed', 'failed' AND 'cancelled' tasks: a failed task
+// may have established a real agent session before crashing (orphaned by a
 // daemon restart, runtime offline, or sweeper timeout), and the daemon pins
 // the resume pointer mid-flight via UpdateAgentTaskSession. Without this,
 // an auto-retry of a mid-run failure would silently start a fresh
 // conversation and lose the in-flight context — exactly what MUL-1128's B
 // branch is meant to fix.
+//
+// A cancelled task is in exactly the same position, and excluding it was the
+// issue-side half of GH #6340: the pinned session is real (the provider emitted
+// it), the user stopped the run rather than the provider rejecting it, and
+// cancellation records no failure_reason/error for the poison filters below to
+// match on. So a stop-then-comment-again sequence keeps its context instead of
+// silently starting cold. A user who wants a clean slate has manual rerun,
+// which never takes this path (see below).
 //
 // Manual rerun (TaskService.RerunIssue) does NOT take this path. The claim
 // handler branches on rerun_of_task_id FIRST and resolves the session/workdir
@@ -2922,12 +3274,14 @@ type GetLastTaskSessionRow struct {
 // Tasks that ended in a known "poisoned" terminal state are also excluded
 // here so even auto-retry does not inherit the bad session. The daemon
 // classifies these failures (iteration_limit, agent_fallback_message,
-// api_invalid_request, codex_semantic_inactivity, agent_error.context_overflow)
+// api_invalid_request, codex_semantic_inactivity, agent_error.context_overflow,
+// codex_resume_oversized)
 // when it detects either an agent fallback marker in the output, an upstream
 // API 400 that means the conversation history itself is unprocessable
 // (oversized image, malformed base64, etc.), a Codex semantic inactivity
-// timeout whose recorded session may replay the same stuck state, or a context
-// window overflow that would immediately overflow again on resume. Keep this
+// timeout whose recorded session may replay the same stuck state, a context
+// window overflow that would immediately overflow again on resume, or a Codex
+// thread/resume response too large to read back (MUL-5722). Keep this
 // list in sync with resumeUnsafeFailureReason and GetLastChatTaskSession.
 //
 // The error-text ILIKE clause is defense-in-depth for the api_invalid_request
@@ -2962,6 +3316,15 @@ type GetLastTaskSessionRow struct {
 // resuming the poisoned session. Both markers are required so the clause stays
 // exactly as narrow as classifyPoisonedError and the Kiro detector — an
 // unrelated error that only mentions image dimensions is NOT excluded.
+//
+// MUL-5722 needed a different shape, and the reason is worth stating because
+// the first attempt got it wrong: a row-level guard like the ones above CANNOT
+// work for an overflowed resume. That failure happens before the turn starts,
+// so the backend has no session id to report and the row lands with session_id
+// NULL — which the latest_per_session CTE drops before any filter runs. The
+// only row naming the oversized thread is the OLDER completed one, which looks
+// perfectly healthy. Hence resume_overflow_at below: block by TIME, which needs
+// nothing from the failed row but its existence. See the clause for details.
 //
 // The final pair of regexes is the provider-agnostic version of the same
 // guard, and it matters most for self-hosted installs: daemons upgrade on
@@ -3206,7 +3569,10 @@ func (q *Queries) HasActiveTaskForIssue(ctx context.Context, issueID pgtype.UUID
 const hasActiveTaskForIssueAndAgent = `-- name: HasActiveTaskForIssueAndAgent :one
 SELECT count(*) > 0 AS has_active FROM agent_task_queue
 WHERE issue_id = $1 AND agent_id = $2
-  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+  AND (
+    status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+    OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
 `
 
 type HasActiveTaskForIssueAndAgentParams struct {
@@ -3216,7 +3582,8 @@ type HasActiveTaskForIssueAndAgentParams struct {
 
 // MUL-4195: true when the (issue, agent) pair has any non-terminal task in a
 // state whose completion will run completion reconciliation — queued,
-// dispatched, running, or waiting_local_directory. Used by the comment enqueue
+// dispatched, running, waiting_local_directory, or the explicitly-marked
+// channel-media deferred state. Used by the comment enqueue
 // path: when a merge into a pre-claim task fails (the task is already
 // dispatched/running, or a mismatched pre-claim task exists), a fresh queued
 // INSERT would collide with idx_one_pending_task_per_issue_agent AND would risk
@@ -3248,7 +3615,11 @@ func (q *Queries) HasPendingTaskForIssue(ctx context.Context, issueID pgtype.UUI
 
 const hasPendingTaskForIssueAndAgent = `-- name: HasPendingTaskForIssueAndAgent :one
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
-WHERE issue_id = $1 AND agent_id = $2 AND status IN ('queued', 'dispatched')
+WHERE issue_id = $1 AND agent_id = $2
+  AND (
+    status IN ('queued', 'dispatched')
+    OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
   AND (
     COALESCE($3::text, '') = ''
     OR context->>'head_sha' = $3::text
@@ -3262,7 +3633,8 @@ type HasPendingTaskForIssueAndAgentParams struct {
 }
 
 // Returns true if a specific agent already has a queued or dispatched task
-// for the given issue. Used by @mention trigger dedup.
+// for the given issue, or the explicitly-marked deferred task whose channel
+// media must bind before the issue agent runs. Used by @mention trigger dedup.
 //
 // head_sha keys the dedup on the commit under review (TEN-356): when a caller
 // passes a non-empty head_sha, a pending task only dedups if it was stamped
@@ -3282,7 +3654,10 @@ const hasPendingTaskForIssueAndAgentExcludingTriggerComment = `-- name: HasPendi
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE issue_id = $1
   AND agent_id = $2
-  AND status IN ('queued', 'dispatched')
+  AND (
+    status IN ('queued', 'dispatched')
+    OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
   AND trigger_comment_id IS DISTINCT FROM $3::uuid
   AND (
     COALESCE($4::text, '') = ''
@@ -4802,7 +5177,10 @@ WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.issue_id = $12
       AND t.agent_id = $13
-      AND t.status = 'queued'
+      AND (
+          t.status = 'queued'
+          OR (t.status = 'deferred' AND t.context->>'channel_issue_media_pending' = 'true')
+      )
       -- Head-scoped (TEN-356, #5914): never fold across HEADs. The physical
       -- unique index is only (issue_id, agent_id), so an insert-race loser can
       -- collide with a pending task stamped for a DIFFERENT head_sha; merging
@@ -4848,22 +5226,21 @@ type MergeCommentIntoPendingTaskRow struct {
 // the latest deliberate instruction while the single run is still told to
 // address every folded comment.
 //
-// Target is restricted to the single 'queued' task on purpose (MUL-4195 review
-// rounds 2–4). This merge is only reached when HasPendingTaskForIssueAndAgent
-// matched a 'queued'/'dispatched' task, and 'dispatched' is deliberately NOT a
+// Target is restricted to a pre-claim task on purpose (MUL-4195 review rounds
+// 2–4). This merge is reached when HasPendingTaskForIssueAndAgent matched a
+// 'queued'/'dispatched' task, or the channel-media deferred task described
+// below. 'dispatched' is deliberately NOT a
 // target: a dispatched / waiting_local_directory / running task has already had
 // its claim response built. Folding afterward would add a planned id that is
 // absent from that response's delivered_comment_ids receipt; completion
-// reconciliation handles it instead. 'deferred' is also NOT
-// a target: a deferred row is an assignee-fallback escalation with its own
-// fire_at/promotion lifecycle, and it never sets AlreadyPending
-// (HasPendingTaskForIssueAndAgent only looks at queued/dispatched). If a newer
-// deferred fallback and an older queued task coexisted, a status-IN target would
-// pick the deferred one by created_at and steal the coalescing target away from
-// the queued run that is actually about to be claimed — so we match ONLY the
-// queued row (the idx_one_pending_task_per_issue_agent unique index guarantees
-// at most one). coalesced_comment_ids remains the pre-claim plan; the claim
-// path records the actual embedded subset in delivered_comment_ids.
+// reconciliation handles it instead. Ordinary 'deferred' rows remain excluded:
+// assignee-fallback escalations have their own fire_at lifecycle and may coexist
+// with a queued primary. The one exception is a task explicitly marked
+// channel_issue_media_pending. It is the issue's sole assigned-agent task and
+// has not been claimable yet, so a new comment must merge into it instead of
+// creating a competing queued task. coalesced_comment_ids remains the pre-claim
+// plan; the claim path records the actual embedded subset in
+// delivered_comment_ids.
 //
 // Recompute-on-merge (MUL-4195 review must-fix #1): originator_user_id,
 // runtime_mcp_overlay and runtime_connected_apps are re-stamped to the NEW
@@ -4902,6 +5279,74 @@ func (q *Queries) MergeCommentIntoPendingTask(ctx context.Context, arg MergeComm
 	)
 	var i MergeCommentIntoPendingTaskRow
 	err := row.Scan(&i.ID, &i.CoalescedCommentIds)
+	return i, err
+}
+
+const promoteDeferredChannelIssueTask = `-- name: PromoteDeferredChannelIssueTask :one
+UPDATE agent_task_queue
+SET status = 'queued', fire_at = NULL
+WHERE id = $1 AND issue_id IS NOT NULL AND status = 'deferred'
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for
+`
+
+// Early promotion is idempotent at the service layer: a task already promoted
+// by the fire_at sweeper no longer matches and is treated as settled.
+func (q *Queries) PromoteDeferredChannelIssueTask(ctx context.Context, id pgtype.UUID) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, promoteDeferredChannelIssueTask, id)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+	)
 	return i, err
 }
 
@@ -5672,6 +6117,40 @@ func (q *Queries) RestoreAgent(ctx context.Context, id pgtype.UUID) (Agent, erro
 	return i, err
 }
 
+const setDeferredChannelIssueTaskRuntimeOverlay = `-- name: SetDeferredChannelIssueTaskRuntimeOverlay :execrows
+UPDATE agent_task_queue
+SET runtime_mcp_overlay = $1,
+    runtime_connected_apps = $2
+WHERE id = $3
+  AND status = 'deferred'
+  AND context->>'channel_issue_media_pending' = 'true'
+  AND trigger_comment_id IS NULL
+  AND originator_user_id IS NOT DISTINCT FROM $4::uuid
+`
+
+type SetDeferredChannelIssueTaskRuntimeOverlayParams struct {
+	RuntimeMcpOverlay        []byte      `json:"runtime_mcp_overlay"`
+	RuntimeConnectedApps     []byte      `json:"runtime_connected_apps"`
+	ID                       pgtype.UUID `json:"id"`
+	ExpectedOriginatorUserID pgtype.UUID `json:"expected_originator_user_id"`
+}
+
+// The issue and its inert media-gated task commit atomically before the optional
+// external overlay is built. Only hydrate the untouched original plan: a comment
+// merge may already have replaced the trigger, attribution, and matching overlay.
+func (q *Queries) SetDeferredChannelIssueTaskRuntimeOverlay(ctx context.Context, arg SetDeferredChannelIssueTaskRuntimeOverlayParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setDeferredChannelIssueTaskRuntimeOverlay,
+		arg.RuntimeMcpOverlay,
+		arg.RuntimeConnectedApps,
+		arg.ID,
+		arg.ExpectedOriginatorUserID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setTaskDeliveredCommentIDs = `-- name: SetTaskDeliveredCommentIDs :one
 UPDATE agent_task_queue
 SET delivered_comment_ids = $1::uuid[]
@@ -6055,7 +6534,11 @@ const updateAgentTaskSession = `-- name: UpdateAgentTaskSession :exec
 UPDATE agent_task_queue
 SET session_id = COALESCE($2, session_id),
     work_dir  = COALESCE($3, work_dir)
-WHERE id = $1 AND status IN ('dispatched', 'running')
+WHERE id = $1
+  AND (
+    status IN ('dispatched', 'running')
+    OR (status = 'cancelled' AND session_id IS NULL)
+  )
 `
 
 type UpdateAgentTaskSessionParams struct {
@@ -6068,6 +6551,15 @@ type UpdateAgentTaskSessionParams struct {
 // session_id/work_dir on the task row. No-op if the task is no longer
 // in dispatched/running. waiting_local_directory tasks have no session yet
 // so this query intentionally skips them.
+//
+// A row the user just cancelled accepts the pin too, but only while its
+// session slot is still empty (GH #6340). The pin is asynchronous — for Codex
+// it waits for the rollout to reach the store — so a cancel landing in that
+// window used to drop the session id for good, and the cancelled turn's
+// context with it. Filling an EMPTY slot on the run's own row is exactly what
+// the mid-flight pin is for; the `session_id IS NULL` guard is what keeps this
+// from being an overwrite, and completed/failed rows stay untouchable so a
+// straggler goroutine can never contradict a terminal report.
 func (q *Queries) UpdateAgentTaskSession(ctx context.Context, arg UpdateAgentTaskSessionParams) error {
 	_, err := q.db.Exec(ctx, updateAgentTaskSession, arg.ID, arg.SessionID, arg.WorkDir)
 	return err

@@ -226,6 +226,7 @@ func (r *feishuSessionBinder) BindMedia(ctx context.Context, p engine.BindMediaP
 		SessionID:   p.SessionID,
 		WorkspaceID: p.WorkspaceID,
 		Sender:      p.Sender,
+		IssueID:     p.IssueID,
 		MediaRefs:   p.MediaRefs,
 	})
 }
@@ -274,6 +275,7 @@ func dispatchResultFromEngine(res engine.Result) DispatchResult {
 		IssueNumber:     res.IssueNumber,
 		IssueIdentifier: res.IssueIdentifier,
 		IssueTitle:      res.IssueTitle,
+		IssueDuplicate:  res.IssueDuplicate,
 	}
 }
 

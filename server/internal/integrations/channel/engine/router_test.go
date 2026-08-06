@@ -242,11 +242,12 @@ func (f *fakeMedia) calls() int {
 }
 
 type fakeIssues struct {
-	called bool
-	params service.IssueCreateParams
-	opts   service.IssueCreateOpts
-	result service.IssueCreateResult
-	err    error
+	called             bool
+	params             service.IssueCreateParams
+	opts               service.IssueCreateOpts
+	result             service.IssueCreateResult
+	err                error
+	attachmentsChanged int
 }
 
 func (f *fakeIssues) Create(_ context.Context, p service.IssueCreateParams, o service.IssueCreateOpts) (service.IssueCreateResult, error) {
@@ -256,20 +257,32 @@ func (f *fakeIssues) Create(_ context.Context, p service.IssueCreateParams, o se
 	return f.result, f.err
 }
 
+func (f *fakeIssues) PublishAttachmentsChanged(db.Issue, pgtype.UUID) {
+	f.attachmentsChanged++
+}
+
 type fakeTasks struct {
-	mu         sync.Mutex
-	called     bool
-	callCount  int
-	promotions int
-	forceFresh bool
-	initiator  pgtype.UUID
-	err        error
+	mu                  sync.Mutex
+	called              bool
+	callCount           int
+	promotions          int
+	issueTaskPromotions []pgtype.UUID
+	forceFresh          bool
+	initiator           pgtype.UUID
+	err                 error
 }
 
 func (f *fakeTasks) PromoteChannelChatTasksIfMediaReady(_ context.Context, _ pgtype.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.promotions++
+	return nil
+}
+
+func (f *fakeTasks) PromoteDeferredChannelIssueTask(_ context.Context, taskID pgtype.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issueTaskPromotions = append(f.issueTaskPromotions, taskID)
 	return nil
 }
 
@@ -560,6 +573,9 @@ func TestRouter_Ingested_InTxMark_FinalizeNone(t *testing.T) {
 	if !waitFor(time.Second, func() bool { return len(h.binder.boundMedia().MediaRefs) == 1 }) {
 		t.Fatalf("resolved media not bound after append: %+v", h.binder.boundMedia().MediaRefs)
 	}
+	if h.binder.boundMedia().IssueID.Valid {
+		t.Fatalf("plain chat media unexpectedly targeted issue %v", h.binder.boundMedia().IssueID)
+	}
 }
 
 func TestRouter_NoMediaMessageSkipsMediaPipeline(t *testing.T) {
@@ -784,6 +800,12 @@ func TestRouter_IssueCommand_Creates(t *testing.T) {
 	if h.issues.params.OriginType.String != "lark_chat" {
 		t.Fatalf("origin_type must come from the resolver set, got %q", h.issues.params.OriginType.String)
 	}
+	if h.tasks.calls() != 0 {
+		t.Fatalf("direct issue create must not also enqueue a chat task, calls=%d", h.tasks.calls())
+	}
+	if h.typing.calls() != 0 {
+		t.Fatalf("terminal issue command must not start a chat processing indicator, calls=%d", h.typing.calls())
+	}
 	if !waitFor(time.Second, func() bool {
 		for _, r := range h.replier.calls() {
 			if r.IssueIdentifier == "MUL-42" && r.IssueTitle == "Fix login" {
@@ -793,6 +815,212 @@ func TestRouter_IssueCommand_Creates(t *testing.T) {
 		return false
 	}) {
 		t.Fatalf("expected an issue-created reply with the workspace-qualified identifier")
+	}
+}
+
+func TestRouter_IssueCommandWithMediaBindsWithoutChatRun(t *testing.T) {
+	h := newHarness(t)
+	issueTaskID := uuidFromString(t, "99999999-9999-4999-8999-999999999999")
+	h.binder.appendResult = AppendResult{
+		MessageID:   uuidFromString(t, "77777777-7777-4777-8777-777777777777"),
+		DedupMarked: true,
+		IssueCommand: &IssueCommand{
+			Title: "Inspect image",
+		},
+	}
+	h.issues.result = service.IssueCreateResult{
+		Issue: db.Issue{
+			ID: uuidFromString(t, "88888888-8888-4888-8888-888888888888"), Number: 43, Title: "Inspect image",
+		},
+		AssignedTaskID: issueTaskID,
+	}
+	if err := h.router.Handle(context.Background(), p2pMessage(t)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !waitFor(time.Second, func() bool { return h.tasks.promotionCalls() == 1 }) {
+		t.Fatal("issue command media did not finish binding")
+	}
+	if h.tasks.calls() != 0 {
+		t.Fatalf("media completion must not enqueue a chat task, calls=%d", h.tasks.calls())
+	}
+	if got := h.binder.boundMedia(); len(got.MediaRefs) != 1 {
+		t.Fatalf("bound media refs = %+v", got.MediaRefs)
+	}
+}
+
+func TestRouter_IssueCommand_ActiveDuplicateIsTerminalProductOutcome(t *testing.T) {
+	h := newHarness(t)
+	h.binder.appendResult = AppendResult{
+		MessageID:   uuidFromString(t, "77777777-7777-4777-8777-777777777777"),
+		DedupMarked: true,
+		IssueCommand: &IssueCommand{
+			Title: "Existing issue",
+		},
+	}
+	duplicate := db.Issue{
+		ID:     uuidFromString(t, "88888888-8888-4888-8888-888888888888"),
+		Number: 44,
+		Title:  "Existing issue",
+	}
+	h.issues.result = service.IssueCreateResult{DuplicateIssue: &duplicate}
+	h.issues.err = service.ErrActiveDuplicate
+
+	if err := h.router.Handle(context.Background(), p2pMessage(t)); err != nil {
+		t.Fatalf("duplicate issue must be a product outcome, got error: %v", err)
+	}
+	if h.tasks.calls() != 0 {
+		t.Fatalf("duplicate command must not enqueue a chat task, calls=%d", h.tasks.calls())
+	}
+	if h.typing.calls() != 0 {
+		t.Fatalf("duplicate command must not start a processing indicator, calls=%d", h.typing.calls())
+	}
+	if !waitFor(time.Second, func() bool {
+		for _, result := range h.replier.calls() {
+			if result.IssueDuplicate && result.IssueID == duplicate.ID && result.IssueIdentifier == "MUL-44" && result.IssueTitle == duplicate.Title {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("duplicate result was not delivered to replier: %+v", h.replier.calls())
+	}
+	if !waitFor(time.Second, func() bool { return len(h.binder.boundMedia().MediaRefs) == 1 }) {
+		t.Fatalf("duplicate media was not finalized: %+v", h.binder.boundMedia())
+	}
+	if got := h.binder.boundMedia().IssueID; got != duplicate.ID {
+		t.Fatalf("duplicate media target = %v, want %v", got, duplicate.ID)
+	}
+	h.tasks.mu.Lock()
+	issuePromotions := len(h.tasks.issueTaskPromotions)
+	h.tasks.mu.Unlock()
+	if issuePromotions != 0 {
+		t.Fatalf("duplicate media promoted a non-existent issue task, calls=%d", issuePromotions)
+	}
+}
+
+func TestRouter_IssueCommand_InfrastructureFailureRemainsError(t *testing.T) {
+	h := newHarness(t)
+	h.binder.appendResult = AppendResult{
+		DedupMarked: true,
+		IssueCommand: &IssueCommand{
+			Title: "Unavailable issue",
+		},
+	}
+	issueErr := errors.New("database unavailable")
+	h.issues.err = issueErr
+
+	err := h.router.Handle(context.Background(), p2pMessage(t))
+	if !errors.Is(err, issueErr) {
+		t.Fatalf("infrastructure failure = %v", err)
+	}
+	if h.tasks.calls() != 0 {
+		t.Fatalf("failed issue command must not enqueue a chat task, calls=%d", h.tasks.calls())
+	}
+	if len(h.replier.calls()) != 0 {
+		t.Fatalf("failed issue command must not emit a success outcome: %+v", h.replier.calls())
+	}
+}
+
+func TestRouter_IssueCommand_MediaTargetsCreatedIssue(t *testing.T) {
+	h := newHarness(t)
+	issueID := uuidFromString(t, "77777777-7777-7777-7777-777777777777")
+	issueTaskID := uuidFromString(t, "88888888-8888-4888-8888-888888888888")
+	h.binder.appendResult = AppendResult{
+		MessageID:   uuidFromString(t, "99999999-9999-4999-8999-999999999999"),
+		DedupMarked: true,
+		IssueCommand: &IssueCommand{
+			Title: "Fix broken layout",
+		},
+	}
+	h.issues.result = service.IssueCreateResult{
+		Issue:          db.Issue{ID: issueID, Number: 42, Title: "Fix broken layout"},
+		AssignedTaskID: issueTaskID,
+	}
+
+	if err := h.router.Handle(context.Background(), p2pMessage(t)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !waitFor(time.Second, func() bool { return len(h.binder.boundMedia().MediaRefs) == 1 }) {
+		t.Fatalf("resolved media not bound: %+v", h.binder.boundMedia())
+	}
+	if got := h.binder.boundMedia().IssueID; got != issueID {
+		t.Fatalf("media target issue = %v, want %v", got, issueID)
+	}
+	if h.issues.opts.AssignedAgentRunFireAt.IsZero() {
+		t.Fatal("media-backed /issue must defer its assigned-agent task")
+	}
+	if !waitFor(time.Second, func() bool {
+		h.tasks.mu.Lock()
+		defer h.tasks.mu.Unlock()
+		return len(h.tasks.issueTaskPromotions) == 1
+	}) {
+		t.Fatal("deferred issue task was not promoted after media binding")
+	}
+	h.tasks.mu.Lock()
+	gotTaskID := h.tasks.issueTaskPromotions[0]
+	h.tasks.mu.Unlock()
+	if gotTaskID != issueTaskID {
+		t.Fatalf("promoted issue task = %v, want %v", gotTaskID, issueTaskID)
+	}
+	if h.issues.attachmentsChanged != 1 {
+		t.Fatalf("attachment change events = %d, want 1", h.issues.attachmentsChanged)
+	}
+}
+
+func TestRouter_IssueCommand_WithoutMediaKeepsImmediateAssignedTask(t *testing.T) {
+	h := newHarness(t)
+	h.media.noMedia = true
+	h.binder.appendResult = AppendResult{
+		DedupMarked: true,
+		IssueCommand: &IssueCommand{
+			Title: "Fix broken layout",
+		},
+	}
+	h.issues.result = service.IssueCreateResult{
+		Issue: db.Issue{ID: uuidFromString(t, "77777777-7777-7777-7777-777777777777"), Number: 42, Title: "Fix broken layout"},
+	}
+
+	if err := h.router.Handle(context.Background(), p2pMessage(t)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !h.issues.opts.AssignedAgentRunFireAt.IsZero() {
+		t.Fatalf("text-only /issue unexpectedly deferred its assigned task until %v", h.issues.opts.AssignedAgentRunFireAt)
+	}
+	h.tasks.mu.Lock()
+	promotions := len(h.tasks.issueTaskPromotions)
+	h.tasks.mu.Unlock()
+	if promotions != 0 {
+		t.Fatalf("text-only /issue task promotions = %d, want 0", promotions)
+	}
+}
+
+func TestRouter_IssueCommand_BindFailurePromotesDeferredTaskWithoutAttachmentEvent(t *testing.T) {
+	h := newHarness(t)
+	issueTaskID := uuidFromString(t, "88888888-8888-4888-8888-888888888888")
+	h.binder.appendResult = AppendResult{
+		DedupMarked: true,
+		IssueCommand: &IssueCommand{
+			Title: "Fix broken layout",
+		},
+	}
+	h.binder.bindErr = errors.New("attachment write failed")
+	h.issues.result = service.IssueCreateResult{
+		Issue:          db.Issue{ID: uuidFromString(t, "77777777-7777-7777-7777-777777777777"), Number: 42, Title: "Fix broken layout"},
+		AssignedTaskID: issueTaskID,
+	}
+
+	if err := h.router.Handle(context.Background(), p2pMessage(t)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !waitFor(time.Second, func() bool {
+		h.tasks.mu.Lock()
+		defer h.tasks.mu.Unlock()
+		return len(h.tasks.issueTaskPromotions) == 1
+	}) {
+		t.Fatal("failed attachment bind left the issue task deferred")
+	}
+	if h.issues.attachmentsChanged != 0 {
+		t.Fatalf("attachment change events after failed bind = %d, want 0", h.issues.attachmentsChanged)
 	}
 }
 

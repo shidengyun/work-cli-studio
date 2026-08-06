@@ -989,62 +989,49 @@ func TestInjectRuntimeConfigBackgroundTaskSafetyProviderAgnostic(t *testing.T) {
 			s := string(data)
 			for _, want := range []string{
 				"## Background Task Safety",
-				// The orphan rule is scoped to run-owned work — an unscoped
-				// "anything still running" would sweep in external systems
-				// (GitHub Actions) the section later says NOT to wait for.
+				// MUL-5442 judgment rewrite (owner-authorized pin renegotiation): the
+				// section now states the one platform fact, the external-systems/CI
+				// boundary with its single exception, and the review-locked
+				// persistent-service contract. Enforcement-detail pins that only
+				// restated derivations of the platform fact were retired with the
+				// prose ("Do NOT end your turn while background tasks", the
+				// tool-promise enumeration, "does not cover tests, builds, CI
+				// polling", "any sleep / retry loop that polls check status", ...).
+				// What stays pinned: the fact, each boundary, each exception, and
+				// the handoff triple — the things an agent cannot infer.
 				"any run-owned work still active is orphaned",
-				"Do NOT end your turn while background tasks",
-				"wait for a future notification/reminder",
-				"run the work synchronously instead",
-				// Hardened pins (MUL-4140): the mechanism that slipped
-				// through in MUL-4091 was a turn ending cleanly with a
-				// "standing by, I'll report when CI finishes" message and
-				// no follow-up wakeup. These pins forbid that shape.
+				"no background-completion wakeup",
+				"whatever a tool response promises",
 				"Never background-and-yield",
-				"foreground tool call that blocks",
-				// MUL-5274: persistent local services are allowed only as
-				// an explicit, verified handoff with a cleanup handle.
+				"foreground tool calls that block",
+				"run unobservable work synchronously",
+				"standing by",
+				"are not run-owned: do not wait",
+				// The full compound ban, not its first item — MUL-5223 made this a
+				// non-derivable boundary, so no member may be silently dropped.
+				"do not run `gh pr checks --watch`, `gh run watch`, or sleep/retry polls",
+				"GitHub Actions after a successful push",
+				"NOT your delivery acceptance criteria",
+				"CI running: <PR link>",
+				"The one exception",
+				"ONE foreground blocking call (`gh pr checks <pr> --watch`)",
 				"persistent service handoff",
 				"running service itself is the requested deliverable",
-				// MUL-5442: pin the handoff concepts, not the operational
-				// phrasing — but the cleanup handle must stay general (a
-				// supervisor/profile-managed service has no single stable PID)
-				// and the user-facing reply must keep the full URL/logs/stop
-				// triple (durable logs alone are unobservable if the user is
-				// never told where they are).
 				"durable logs",
 				"cleanup handle such as PID/profile",
 				"verify readiness",
 				"URL, logs, and stop instructions",
 				"survival as best-effort, not guaranteed",
-				"does not cover tests, builds, CI polling",
-				"are not agent-owned background tasks",
-				"GitHub Actions after a successful push",
-				"Do not wait for them by default",
-				// MUL-5223: the conceptual boundary above was read as
-				// compatible with `gh pr checks --watch` (a blocking
-				// foreground call) whenever the repo required green CI to
-				// merge. These pins name the banned tool shapes, deny
-				// merge requirements as acceptance criteria, and supply
-				// the replacement hand-off phrasing.
-				"do NOT run `gh pr checks --watch`",
-				"any sleep / retry loop that polls check status",
-				"NOT your delivery acceptance criteria",
-				"CI running: <PR link>",
-				// The ban must stay scoped: an explicitly requested CI
-				// result is still reachable, and the section must name
-				// the one executable way to collect it. Without these
-				// pins the ban could be re-absolutised and the exception
-				// would become unfollowable.
-				"unless the explicit exception below applies",
-				"The one exception",
-				"ONE foreground blocking call (`gh pr checks <pr> --watch`)",
-				"running in the background so you can keep working",
-				"standing by",
 			} {
 				if !strings.Contains(s, want) {
 					t.Errorf("%s missing background task safety text %q\n---\n%s", tc.file, want, s)
 				}
+			}
+			// Exactly one exception: substring pins cannot see a duplicated
+			// "The one exception" clause (a second, wider-scope copy slipped
+			// in during the MUL-5442 rewrite and every pin stayed green).
+			if got := strings.Count(s, "The one exception"); got != 1 {
+				t.Errorf("%s must state the CI exception exactly once, got %d\n---\n%s", tc.file, got, s)
 			}
 			// `gh run watch` may only appear as a banned command, never as
 			// the section's example of how to wait properly.
@@ -1926,7 +1913,10 @@ func TestInjectRuntimeConfigRequiresExplicitCommentPost(t *testing.T) {
 			// The workflow must contain an explicit `multica issue comment add`
 			// invocation for this issue — not just a prose mention of posting.
 			mustContain := []string{
-				"multica issue comment add issue-1",
+				// MUL-5442 cross-channel dedup: the brief states the loop shape; the
+				// ready-to-run commands with real ids live in the per-turn message.
+				// Pin the command NAME and the flag mnemonics, not full templates.
+				"post it with `multica issue comment add` using",
 				"mandatory",
 			}
 			for _, want := range mustContain {
@@ -1964,7 +1954,7 @@ func TestInjectRuntimeConfigCommentGuardrailIsProviderAgnostic(t *testing.T) {
 	t.Cleanup(func() { runtimeGOOS = saved })
 
 	for _, host := range []string{"linux", "darwin", "windows"} {
-		for _, provider := range []string{"claude", "opencode", "openclaw", "hermes", "kimi", "kiro", "cursor"} {
+		for _, provider := range []string{"claude", "opencode", "openclaw", "hermes", "kimi", "reasonix", "kiro", "cursor"} {
 			t.Run(provider+"/"+host, func(t *testing.T) {
 				runtimeGOOS = host
 				dir := t.TempDir()
@@ -2058,17 +2048,31 @@ func TestInjectRuntimeConfigLinuxCommentFormattingEmphasizesFile(t *testing.T) {
 			}
 			s := string(data)
 
+			// Assert inside the section slice: "#4182" also appears in
+			// Available Commands, so a whole-file Contains would stay green
+			// with the HEREDOC ban deleted here (review catch on #6453).
+			// Match the HEADING at line start — Available Commands references
+			// "## Comment Formatting" inline earlier in the file.
+			cfStart := strings.Index(s, "\n## Comment Formatting\n")
+			if cfStart < 0 {
+				t.Fatalf("%s missing ## Comment Formatting section\n---\n%s", fileName, s)
+			}
+			cf := s[cfStart+1:]
+			if next := strings.Index(cf[3:], "\n## "); next >= 0 {
+				cf = cf[:next+3]
+			}
 			for _, want := range []string{
-				"## Comment Formatting",
 				"always write the comment body to a UTF-8 file with your file-write tool first, then post it with `--content-file <path>`",
-				"#4182",
 				"Never use inline `--content` for agent-authored comments",
+				"never use `--content-stdin` HEREDOCs alongside other flags",
+				"#4182",
+				"never `/tmp` or shared paths",
 				"Keep the same `--parent` value",
 				"rm ./reply.md",
 				"do not rely on `\\n` escapes",
 			} {
-				if !strings.Contains(s, want) {
-					t.Errorf("%s missing comment-formatting guidance %q\n---\n%s", fileName, want, s)
+				if !strings.Contains(cf, want) {
+					t.Errorf("%s Comment Formatting section missing %q\n---\n%s", fileName, want, cf)
 				}
 			}
 
@@ -2111,7 +2115,7 @@ func TestInjectRuntimeConfigCodexWindowsUsesContentFile(t *testing.T) {
 		"On Windows, **always write the comment body to a UTF-8 file",
 		"$OutputEncoding",
 		"--content-file",
-		"silently dropping non-ASCII characters as `?`",
+		"may replace non-ASCII characters with `?`",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("AGENTS.md missing Codex/Windows file-first guidance %q\n---\n%s", want, s)
@@ -2144,7 +2148,7 @@ func TestInjectRuntimeConfigQuickCreateOutputPrefixAgnostic(t *testing.T) {
 		"quick-create task",
 		"Created <identifier-or-id>: <title>",
 		"identifier` from JSON output",
-		"Do not assume any workspace issue prefix",
+		"never assume a workspace issue prefix",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("quick-create runtime config missing %q\n---\n%s", want, s)
@@ -4961,8 +4965,17 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 		for _, want := range []string{
 			"side-effecting actions",
 			"enqueues a new run for that agent",
-			"When NOT to use a mention link",
-			"When a mention IS appropriate",
+			// MUL-5442 judgment rewrite: the two H3 subsections merged into one
+			// paragraph — pin the policy anchors, not the retired headings.
+			"Default: NO mention",
+			// Each warranted-case scope qualifier pinned separately — "not yet
+			// involved" and "for the first time" ARE the anti-repeat-notify
+			// scope, not decoration (review catch on #6453).
+			"restarts an agent-to-agent loop and costs the user money",
+			"Mention only when escalating to a human owner",
+			"not yet involved",
+			"for the first time",
+			"explicitly asks to loop someone in",
 			"end with no mention at all",
 			"Silence ends conversations",
 		} {
@@ -4993,6 +5006,12 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 		// pinning which section carries it.
 		for _, want := range []string{
 			"Decide whether a reply is warranted",
+			// Both outcomes pinned individually (MUL-5442 stage-1 review):
+			// the work-produced arm and the silent-exit arm must each
+			// survive compression, not just the bullet's heading.
+			"produced actual work",
+			"pure acknowledgment / thanks / sign-off",
+			"do NOT reply",
 			"Silence is a valid and preferred way",
 			"Never @mention the agent you are replying to as a thank-you or sign-off",
 		} {
@@ -5256,8 +5275,11 @@ func TestTaskInitiatorBlockMember(t *testing.T) {
 	for _, want := range []string{
 		"## Task Initiator",
 		"initiated by **Bohan** (bohan@example.com), a member of this workspace",
+		"is who you are answering",
 		"apply any per-person privacy or access rules",
 		"credentials stay scoped to the runtime owner",
+		"attribution does not change what you may read or write",
+		"do not assume the initiator can see everything you can",
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("expected initiator block to contain %q\n---\n%s", want, block)
@@ -5377,8 +5399,14 @@ func TestInjectRuntimeConfigBriefKeepsStaticCatchUpRead(t *testing.T) {
 	}
 	s := string(data)
 
-	if !strings.Contains(s, "multica issue comment list "+issueID+" --roots-only --summary --output json") {
-		t.Errorf("brief must keep the static catch-up read\n---\n%s", s)
+	// MUL-5442 cross-channel dedup: the full command with the real issue id
+	// moved to the per-turn message (every issue variant carries it); the
+	// brief keeps the doctrine and the flag mnemonics.
+	if !strings.Contains(s, "scan every thread cheaply (`--roots-only --summary`)") {
+		t.Errorf("brief must keep the bounded catch-up doctrine\n---\n%s", s)
+	}
+	if strings.Contains(s, issueID) {
+		t.Errorf("workflow steps must not embed the issue id anymore (MUL-5442)\n---\n%s", s)
 	}
 	if strings.Contains(s, "--recent 20") {
 		t.Errorf("brief still uses recent 20\n---\n%s", s)
@@ -5436,7 +5464,6 @@ func TestInjectRuntimeConfigBriefOmitsResumedThreadAnchor(t *testing.T) {
 	for _, want := range []string{
 		"triggering comment is already included above",
 		"No other new comments on this issue since your last run",
-		"active thread anchor `thread-root-1` and triggering comment ID `" + triggerID + "`",
 		"If your reply depends on thread context",
 		"do not rely only on resumed session memory",
 		"multica issue comment list " + issueID + " --thread thread-root-1 --tail 30 --output json",
@@ -5444,6 +5471,11 @@ func TestInjectRuntimeConfigBriefOmitsResumedThreadAnchor(t *testing.T) {
 		if !strings.Contains(hint, want) {
 			t.Errorf("resumed hint missing %q\n---\n%s", want, hint)
 		}
+	}
+	// The anchor-restating sentence is gone (MUL-5721 OPT-1): the read command
+	// carries the thread anchor and the reply cookbook carries the trigger id.
+	if strings.Contains(hint, "active thread anchor") {
+		t.Errorf("resumed hint must not restate anchors outside the commands, got:\n%s", hint)
 	}
 }
 
@@ -5467,7 +5499,7 @@ func TestInjectRuntimeConfigAssignmentTriggerScansRootsFirst(t *testing.T) {
 	// Mandatory comment catch-up must stay, but the required first read is
 	// bounded to recent active threads instead of the full flat timeline.
 	for _, want := range []string{
-		"multica issue comment list issue-1 --roots-only --summary --output json",
+		"scan every thread cheaply (`--roots-only --summary`)",
 		"this is mandatory, not optional",
 		"Skipping this step is the most common cause",
 	} {
@@ -5531,10 +5563,12 @@ func TestInjectRuntimeConfigCatchUpScansRootsFirst(t *testing.T) {
 	s := string(data)
 
 	for _, want := range []string{
-		// The cheap scan is the first thing step 3 asks for.
-		"multica issue comment list issue-1 --roots-only --summary --output json",
+		// The cheap scan is the first thing step 3 asks for; the full
+		// command with real ids arrives in the per-turn message (MUL-5442
+		// cross-channel dedup), so the brief pins the flag mnemonics.
+		"scan every thread cheaply (`--roots-only --summary`)",
 		// ...followed by an explicit, bounded drill-down.
-		"multica issue comment list issue-1 --thread <thread-id> --tail 30 --output json",
+		"expand only the threads that matter (`--thread <id> --tail 30`)",
 		// The headline saturation warning stays in the flag reference; the
 		// deep semantics (per-thread cap, root-thread saturation) moved to the
 		// CLI's own --help (MUL-5442) and are pinned there
@@ -5604,30 +5638,22 @@ func TestInjectRuntimeConfigIssueMetadataSectionScope(t *testing.T) {
 	withSection := wantSection{
 		present: []string{
 			"## Issue Metadata",
-			"high-signal scratchpad",
 			"**Read on entry.**",
 			"**Write on exit.**",
-			"**What NOT to pin.**",
-			"**Recommended keys**",
-			// Recommended-key list — both lea's killer-use-case keys
-			// (pr_number, pipeline_status) and the broader set from
-			// review must be named so the workspace converges on shared
-			// vocabulary.
-			"pr_url",
-			"pr_number",
-			"pipeline_status",
-			"deploy_url",
-			"external_issue_url",
-			"waiting_on",
-			"blocked_reason",
-			"decision",
-			// Safety boundaries — these are the negative rules that
-			// keep metadata from rotting into a second description /
-			// log dump.
-			"No secrets, tokens, or API keys",
-			"No logs",
-			"runtime bookkeeping",
-			"snake_case ASCII",
+			"Hints, not truth",
+			// MUL-5442: the brief keeps only what the interface cannot
+			// express — the read stance, the re-read bar, and the two
+			// write-time boundaries (secrets, length). The full ban list
+			// and the key-naming conventions live in the
+			// multica-working-on-issues skill, pinned by
+			// TestWorkingOnIssuesSkillCoversIssueLoopContracts so this
+			// pointer cannot dangle. The recommended-keys block was
+			// removed outright: metadata is deliberately free-form custom
+			// state (owner decision on MUL-5442), not a vocabulary the
+			// platform curates in every brief.
+			"never secrets or long content",
+			"multica issue metadata delete",
+			"the `multica-working-on-issues` skill",
 		},
 	}
 	withoutSection := wantSection{
@@ -5669,7 +5695,11 @@ func TestInjectRuntimeConfigIssueMetadataSectionScope(t *testing.T) {
 			provider: "claude",
 			filename: "CLAUDE.md",
 			workflowStepPresent: []string{
-				"multica issue metadata list issue-md-1 --output json",
+				"Read the metadata bag (`multica issue metadata list`)",
+				// Platform failure semantics, not tool mechanics: a failed
+				// metadata read must never block the main task (MUL-5442
+				// stage-1 review).
+				"CLI failures are normal",
 				// Both steps point at the section instead of restating its
 				// rules (MUL-5442); the entry step names what to look for,
 				// the exit step names the write bar.
@@ -5690,7 +5720,7 @@ func TestInjectRuntimeConfigIssueMetadataSectionScope(t *testing.T) {
 			provider: "claude",
 			filename: "CLAUDE.md",
 			workflowStepPresent: []string{
-				"multica issue metadata list issue-md-2 --output json",
+				"Read the metadata bag (`multica issue metadata list`)",
 				"What to look for: `## Issue Metadata`",
 				"the bar in `## Issue Metadata`",
 				"multica issue metadata set",
@@ -5810,7 +5840,7 @@ func TestInjectRuntimeConfigIssueMetadataCodexFormattingUnchanged(t *testing.T) 
 		if !strings.Contains(s, "## Issue Metadata") {
 			t.Fatalf("Issue Metadata section missing\n---\n%s", s)
 		}
-		if !strings.Contains(s, "multica issue metadata list issue-md-codex --output json") {
+		if !strings.Contains(s, "Read the metadata bag (`multica issue metadata list`)") {
 			t.Fatalf("metadata list step missing\n---\n%s", s)
 		}
 		// ...AND the post-#4182 file-first rule is still emitted on Linux.

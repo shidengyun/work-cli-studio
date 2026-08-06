@@ -3027,7 +3027,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 			AssigneeChanged: assigneeChanged,
 			StatusChanged:   statusChanged,
 		},
-		h.issueTriggerProbe(r, actorType, actorID, workspaceID, issue),
+		h.issueTriggerWriteProbe(r, actorType, issue),
 	); ok && !req.SuppressRun {
 		h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, req.HandoffNote)
 	}
@@ -3120,8 +3120,8 @@ func (h *Handler) validateAssigneePair(ctx context.Context, r *http.Request, wor
 // shouldEnqueueAgentTask returns true when an issue creation or assignment
 // should trigger the assigned agent. Backlog issues are skipped — backlog
 // acts as a parking lot where issues can be pre-assigned without immediately
-// triggering execution. Moving out of backlog or blocked is handled separately
-// in UpdateIssue.
+// triggering execution. Moving out of backlog is handled separately in
+// UpdateIssue.
 func (h *Handler) shouldEnqueueAgentTask(ctx context.Context, issue db.Issue) bool {
 	if issue.Status == "backlog" {
 		return false
@@ -3227,13 +3227,7 @@ func (h *Handler) DeleteIssue(w http.ResponseWriter, r *http.Request) {
 	// Fail any linked autopilot runs before delete (ON DELETE SET NULL clears issue_id).
 	h.Queries.FailAutopilotRunsByIssue(r.Context(), issue.ID)
 
-	// Collect all attachment URLs (issue-level + comment-level) before CASCADE delete.
-	attachmentURLs, _ := h.Queries.ListAttachmentURLsByIssueOrComments(r.Context(), issue.ID)
-
-	err := h.Queries.DeleteIssue(r.Context(), db.DeleteIssueParams{
-		ID:          issue.ID,
-		WorkspaceID: issue.WorkspaceID,
-	})
+	attachmentURLs, err := h.deleteIssueAndCollectAttachmentURLs(r.Context(), issue)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete issue")
 		return
@@ -3249,6 +3243,41 @@ func (h *Handler) DeleteIssue(w http.ResponseWriter, r *http.Request) {
 	h.publish(protocol.EventIssueDeleted, uuidToString(issue.WorkspaceID), actorType, actorID, map[string]any{"issue_id": resolvedID})
 	slog.Info("issue deleted", append(logger.RequestAttrs(r), "issue_id", resolvedID, "workspace_id", uuidToString(issue.WorkspaceID))...)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteIssueAndCollectAttachmentURLs serializes issue deletion with channel
+// media binding. The delete-side FOR UPDATE conflicts with the binder's
+// FOR KEY SHARE, and URL collection happens only after that lock is held:
+// bind-first means the new URL is collected; delete-first means the bind rolls
+// back without consuming its durable object intent.
+func (h *Handler) deleteIssueAndCollectAttachmentURLs(ctx context.Context, issue db.Issue) ([]string, error) {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin issue delete: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+
+	if _, err := qtx.LockIssueForDelete(ctx, db.LockIssueForDeleteParams{
+		ID:          issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+	}); err != nil {
+		return nil, fmt.Errorf("lock issue for delete: %w", err)
+	}
+	attachmentURLs, err := qtx.ListAttachmentURLsByIssueOrComments(ctx, issue.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list issue attachment URLs: %w", err)
+	}
+	if err := qtx.DeleteIssue(ctx, db.DeleteIssueParams{
+		ID:          issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+	}); err != nil {
+		return nil, fmt.Errorf("delete issue: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit issue delete: %w", err)
+	}
+	return attachmentURLs, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -3525,7 +3554,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 				AssigneeChanged: assigneeChanged,
 				StatusChanged:   statusChanged,
 			},
-			h.issueTriggerProbe(r, actorType, actorID, workspaceID, issue),
+			h.issueTriggerWriteProbe(r, actorType, issue),
 		); ok && !req.Updates.SuppressRun {
 			h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, req.Updates.HandoffNote)
 		}
@@ -3602,13 +3631,8 @@ func (h *Handler) BatchDeleteIssues(w http.ResponseWriter, r *http.Request) {
 		h.TaskService.CancelTasksForIssue(r.Context(), issue.ID)
 		h.Queries.FailAutopilotRunsByIssue(r.Context(), issue.ID)
 
-		// Collect attachment URLs before CASCADE delete to clean up S3 objects.
-		attachmentURLs, _ := h.Queries.ListAttachmentURLsByIssueOrComments(r.Context(), issue.ID)
-
-		if err := h.Queries.DeleteIssue(r.Context(), db.DeleteIssueParams{
-			ID:          issue.ID,
-			WorkspaceID: issue.WorkspaceID,
-		}); err != nil {
+		attachmentURLs, err := h.deleteIssueAndCollectAttachmentURLs(r.Context(), issue)
+		if err != nil {
 			slog.Warn("batch delete issue failed", "issue_id", issueID, "error", err)
 			continue
 		}

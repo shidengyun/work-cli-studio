@@ -83,9 +83,12 @@ Issue/comment commands often needed with squads:
 ```bash
 multica issue get <issue-id> --output json
 multica issue update <issue-id> --help
-multica issue comment list <issue-id> --output json
+multica issue comment list <issue-id> --roots-only --summary --output json
 multica issue comment add <issue-id> --help
 ```
+
+Comment reads stay bounded — the scan-then-expand sequence from the quick
+start above — never one unbounded `issue comment list` pull.
 
 Prefer `--output json` for reads. Use `--help` before writes.
 
